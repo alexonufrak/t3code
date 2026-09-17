@@ -102,6 +102,8 @@ function room(overrides: Partial<PairRoom> = {}): PairRoom {
     consults: [],
     assignments: [],
     decisions: [],
+    leadSwitch: null,
+    formerParticipants: [],
     createdAt: AT,
     updatedAt: AT,
     ...overrides,
@@ -134,8 +136,15 @@ describe("derivePairAvailability", () => {
 });
 
 describe("pair room membership and summary", () => {
-  it("finds the role of Lead, Peer and assignment threads", () => {
-    const rooms = [room({ assignments: [assignment({})] })];
+  it("finds the role of Lead, Peer, assignment and retired threads", () => {
+    const EARLIER = ThreadId.make("earlier-lead");
+    const rooms = [
+      room({
+        assignments: [assignment({})],
+        formerParticipants: [{ persona: "astra", role: "lead", threadId: EARLIER, until: AT }],
+      }),
+    ];
+    expect(pairRoomMembership(rooms, EARLIER)).toMatchObject({ role: "former", persona: "astra" });
     expect(pairRoomMembership(rooms, LEAD)).toMatchObject({ role: "lead", persona: "fable" });
     expect(pairRoomMembership(rooms, PEER)).toMatchObject({ role: "peer", persona: "astra" });
     expect(pairRoomMembership(rooms, ASSIGNEE)).toMatchObject({

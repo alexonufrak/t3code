@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import {
@@ -25,6 +26,10 @@ export const PAIR_ROOM_LIST_MAX_ITEMS = 20;
 export const PAIR_ROOM_MAX_ROUNDS_LIMIT = 6;
 /** Settled consults older than this many are dropped from the room record. */
 export const PAIR_ROOM_SETTLED_CONSULTS_KEPT = 20;
+/** The outgoing Lead's handoff, held on the room only until the user confirms the switch. */
+export const PAIR_ROOM_HANDOFF_MAX_LENGTH = 16000;
+/** Threads a room remembers from before its Lead switches. */
+export const PAIR_ROOM_FORMER_PARTICIPANTS_KEPT = 20;
 
 const PairTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(PAIR_ROOM_TITLE_MAX_LENGTH));
 const PairText = TrimmedNonEmptyString.check(Schema.isMaxLength(PAIR_ROOM_TEXT_MAX_LENGTH));
@@ -210,6 +215,30 @@ export const PairDecision = Schema.Struct({
 });
 export type PairDecision = typeof PairDecision.Type;
 
+/**
+ * A Lead switch in progress. The outgoing Lead drafts a handoff, the user
+ * reads it, and only their confirmation swaps the roles.
+ */
+export const PairLeadSwitch = Schema.Struct({
+  toPersona: PairPersona,
+  phase: Schema.Literals(["drafting", "ready", "failed"]),
+  requestedAt: IsoDateTime,
+  handoff: Schema.NullOr(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(PAIR_ROOM_HANDOFF_MAX_LENGTH)),
+  ),
+  error: Schema.NullOr(PairText),
+});
+export type PairLeadSwitch = typeof PairLeadSwitch.Type;
+
+/** A participant thread from before a Lead switch; kept as read-only history. */
+export const PairFormerParticipant = Schema.Struct({
+  persona: PairPersona,
+  role: PairRole,
+  threadId: ThreadId,
+  until: IsoDateTime,
+});
+export type PairFormerParticipant = typeof PairFormerParticipant.Type;
+
 export const PairRoom = Schema.Struct({
   roomId: PairRoomId,
   projectId: ProjectId,
@@ -225,6 +254,10 @@ export const PairRoom = Schema.Struct({
   consults: Schema.Array(PairConsult),
   assignments: Schema.Array(PairAssignment),
   decisions: Schema.Array(PairDecision),
+  leadSwitch: Schema.NullOr(PairLeadSwitch).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  formerParticipants: Schema.Array(PairFormerParticipant).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -290,6 +323,19 @@ export const PairRoomUserCommand = Schema.Union([
     scopeGlobs: Schema.Array(TrimmedNonEmptyString).check(Schema.isMinLength(1)),
   }),
   Schema.Struct({
+    /** Asks the Lead for a handoff; nothing changes hands until `lead.switch-confirm`. */
+    type: Schema.Literal("lead.switch-start"),
+    roomId: PairRoomId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("lead.switch-confirm"),
+    roomId: PairRoomId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("lead.switch-cancel"),
+    roomId: PairRoomId,
+  }),
+  Schema.Struct({
     type: Schema.Literal("decision.resolve"),
     roomId: PairRoomId,
     decisionId: TrimmedNonEmptyString,
@@ -298,7 +344,11 @@ export const PairRoomUserCommand = Schema.Union([
 ]);
 export type PairRoomUserCommand = typeof PairRoomUserCommand.Type;
 
-export const PairRoomDispatchResult = Schema.Struct({ roomId: PairRoomId });
+export const PairRoomDispatchResult = Schema.Struct({
+  roomId: PairRoomId,
+  /** The thread the user should look at next, such as the new Lead's after a switch. */
+  threadId: Schema.optionalKey(ThreadId),
+});
 export type PairRoomDispatchResult = typeof PairRoomDispatchResult.Type;
 
 export class PairRoomCommandError extends Schema.TaggedError<PairRoomCommandError>()(

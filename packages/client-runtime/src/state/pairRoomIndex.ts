@@ -66,7 +66,8 @@ export function derivePairAvailability(providers: ReadonlyArray<ServerProvider>)
   return { available: participants.every((entry) => entry.available), participants };
 }
 
-export type PairThreadRole = "lead" | "peer" | "assignee";
+/** "former" is a participant thread retired by a Lead switch, kept as history. */
+export type PairThreadRole = "lead" | "peer" | "assignee" | "former";
 
 export interface PairThreadMembership {
   readonly room: PairRoom;
@@ -86,6 +87,8 @@ export function pairRoomMembership(
     }
     const assignment = room.assignments.find((entry) => entry.threadId === threadId);
     if (assignment) return { room, role: "assignee", persona: assignment.owner, assignment };
+    const former = room.formerParticipants.find((entry) => entry.threadId === threadId);
+    if (former) return { room, role: "former", persona: former.persona, assignment: null };
   }
   return null;
 }
@@ -123,6 +126,8 @@ export function pairRoomSummary(room: PairRoom): string {
   const parts = [lead ? `${pairPersonaName(lead.persona)} leads` : "Pair room"];
   if (room.status === "paused") parts.push("paused");
   if (room.status === "closed") parts.push("closed");
+  if (room.leadSwitch?.phase === "drafting") parts.push("writing handoff");
+  if (room.leadSwitch?.phase === "ready") parts.push("handoff ready");
   const running = pairRoomRunningCount(room);
   if (running > 0) parts.push(`${running} running`);
   const attention = pairRoomAttention(room);
@@ -148,8 +153,9 @@ export const isActivePairAssignment = (assignment: PairAssignment) =>
   PAIR_ASSIGNMENT_ACTIVE_STATES.has(assignment.state);
 
 /**
- * Maps each Peer and assignment thread to the Lead thread it nests under in
- * a thread list. Lead threads are not in the map; they stay top-level.
+ * Maps each Peer, assignment and former participant thread to the current
+ * Lead thread it nests under in a thread list. Lead threads are not in the
+ * map; they stay top-level.
  */
 export function pairRoomParentThreads(
   rooms: ReadonlyArray<PairRoom>,
@@ -161,6 +167,7 @@ export function pairRoomParentThreads(
     const peerThreadId = pairRoomParticipant(room, "peer")?.threadId;
     if (peerThreadId) parents.set(peerThreadId, leadThreadId);
     for (const assignment of room.assignments) parents.set(assignment.threadId, leadThreadId);
+    for (const former of room.formerParticipants) parents.set(former.threadId, leadThreadId);
   }
   return parents;
 }

@@ -15,11 +15,12 @@ import {
   type PairAssignment,
   type PairDecision,
   type PairRoom,
+  type PairRoomDispatchResult,
   type PairRoomUserCommand,
   type ScopedThreadRef,
   type ThreadId,
 } from "@t3tools/contracts";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { UsersIcon } from "lucide-react";
 import { memo, useCallback, useId, useState, type ReactNode } from "react";
 
@@ -40,7 +41,10 @@ const RESUMABLE_STATES: ReadonlySet<PairAssignment["state"]> = new Set([
   "cancelled",
 ]);
 
-type RoomCommandRunner = (command: PairRoomUserCommand, failureTitle: string) => Promise<void>;
+type RoomCommandRunner = (
+  command: PairRoomUserCommand,
+  failureTitle: string,
+) => Promise<PairRoomDispatchResult | null>;
 
 /**
  * Header chip for threads in a Pair Room: who leads, what is running and
@@ -55,9 +59,10 @@ export const PairRoomHeaderChip = memo(function PairRoomHeaderChip(props: {
 
   const run = useCallback<RoomCommandRunner>(
     async (command, failureTitle) => {
-      if (environmentId === null) return;
+      if (environmentId === null) return null;
       const result = await dispatch({ environmentId, input: command });
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      if (result._tag === "Success") return result.value;
+      if (!isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         toastManager.add({
           type: "error",
@@ -65,6 +70,7 @@ export const PairRoomHeaderChip = memo(function PairRoomHeaderChip(props: {
           description: error instanceof Error ? error.message : "An error occurred.",
         });
       }
+      return null;
     },
     [dispatch, environmentId],
   );
@@ -72,8 +78,14 @@ export const PairRoomHeaderChip = memo(function PairRoomHeaderChip(props: {
   if (membership === null || environmentId === null) return null;
   const { room } = membership;
   const attention = pairRoomAttention(room);
-  const needsYou = attention.merges.length + attention.decisions.length;
-  const summary = pairRoomSummary(room);
+  const needsYou =
+    attention.merges.length +
+    attention.decisions.length +
+    (room.leadSwitch?.phase === "ready" ? 1 : 0);
+  const summary =
+    membership.role === "former"
+      ? `Earlier thread · ${pairRoomSummary(room)}`
+      : pairRoomSummary(room);
 
   return (
     <Popover>
@@ -142,6 +154,9 @@ function PairRoomDetails(props: {
     )
     .slice(-6);
   const lead = pairRoomParticipant(room, "lead");
+  const isLiveThread =
+    props.currentThreadId === null ||
+    !room.formerParticipants.some((former) => former.threadId === props.currentThreadId);
   const statusText =
     room.status === "active"
       ? "Active"
@@ -154,7 +169,24 @@ function PairRoomDetails(props: {
           Pair room
         </h2>
         <p className="text-xs text-muted-foreground">{statusText}</p>
+        {lead?.threadId && props.currentThreadId !== null && !isLiveThread ? (
+          <p className="mt-1 text-xs text-muted-foreground">
+            This thread is from before the Lead changed.{" "}
+            <ThreadLink
+              environmentId={props.environmentId}
+              threadId={lead.threadId}
+              currentThreadId={props.currentThreadId}
+            >
+              {pairPersonaName(lead.persona)} leads now
+            </ThreadLink>
+            .
+          </p>
+        ) : null}
       </header>
+
+      {room.status !== "closed" && isLiveThread ? (
+        <LeadSwitchSection room={room} environmentId={props.environmentId} run={run} />
+      ) : null}
 
       <section aria-label="Participants">
         <ul className="flex flex-col gap-1 text-xs">
@@ -388,6 +420,98 @@ function PairRoomDetails(props: {
         ) : null}
       </footer>
     </article>
+  );
+}
+
+function LeadSwitchSection(props: {
+  room: PairRoom;
+  environmentId: ScopedThreadRef["environmentId"];
+  run: RoomCommandRunner;
+}) {
+  const { room, run } = props;
+  const navigate = useNavigate();
+  const headingId = useId();
+  const [pending, setPending] = useState(false);
+  const lead = pairRoomParticipant(room, "lead");
+  if (!lead?.threadId) return null;
+  const next = room.leadSwitch?.toPersona ?? (lead.persona === "fable" ? "astra" : "fable");
+  const cancel = () =>
+    void run({ type: "lead.switch-cancel", roomId: room.roomId }, "Could not cancel the switch");
+  const start = () =>
+    void run({ type: "lead.switch-start", roomId: room.roomId }, "Could not start the switch");
+
+  if (room.leadSwitch === null) {
+    if (room.status !== "active") return null;
+    return (
+      <section aria-label="Lead">
+        <Button type="button" size="xs" variant="outline" onClick={start}>
+          Switch Lead to {pairPersonaName(next)}
+        </Button>
+      </section>
+    );
+  }
+
+  return (
+    <section aria-labelledby={headingId} className="flex flex-col gap-1.5 text-xs">
+      <h3 id={headingId} className="font-medium text-foreground">
+        Switching Lead to {pairPersonaName(next)}
+      </h3>
+      {room.leadSwitch.phase === "drafting" ? (
+        <p className="text-muted-foreground">
+          {pairPersonaName(lead.persona)} is writing a handoff. You can read it before anything
+          changes.
+        </p>
+      ) : null}
+      {room.leadSwitch.phase === "failed" ? (
+        <p className="text-muted-foreground">
+          No handoff yet: {room.leadSwitch.error ?? "the Lead did not write one."}
+        </p>
+      ) : null}
+      {room.leadSwitch.phase === "ready" && room.leadSwitch.handoff ? (
+        <div
+          className="max-h-56 overflow-y-auto whitespace-pre-wrap rounded-md border border-border/70 p-2 text-muted-foreground"
+          tabIndex={0}
+          aria-label={`Handoff from ${pairPersonaName(lead.persona)}`}
+        >
+          {room.leadSwitch.handoff}
+        </div>
+      ) : null}
+      <div className="flex flex-wrap gap-1">
+        {room.leadSwitch.phase === "ready" ? (
+          <Button
+            type="button"
+            size="xs"
+            disabled={pending}
+            onClick={() => {
+              setPending(true);
+              void run(
+                { type: "lead.switch-confirm", roomId: room.roomId },
+                "Could not switch the Lead",
+              )
+                .then((result) => {
+                  if (result?.threadId) {
+                    void navigate({
+                      to: "/$environmentId/$threadId",
+                      params: { environmentId: props.environmentId, threadId: result.threadId },
+                    });
+                  }
+                })
+                .finally(() => setPending(false));
+            }}
+          >
+            {pending ? "Handing off..." : `Hand off to ${pairPersonaName(next)}`}
+          </Button>
+        ) : null}
+        {room.leadSwitch.phase === "failed" ? (
+          <Button type="button" size="xs" variant="outline" onClick={start}>
+            Try again
+          </Button>
+        ) : null}
+        <Button type="button" size="xs" variant="ghost" disabled={pending} onClick={cancel}>
+          Cancel switch
+        </Button>
+      </div>
+    </section>
   );
 }
 

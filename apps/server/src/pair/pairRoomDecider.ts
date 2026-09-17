@@ -2,6 +2,8 @@
 import {
   PAIR_ASSIGNMENT_ACTIVE_STATES,
   PAIR_ROOM_DEFAULT_MAX_ROUNDS,
+  PAIR_ROOM_FORMER_PARTICIPANTS_KEPT,
+  PAIR_ROOM_HANDOFF_MAX_LENGTH,
   PAIR_ROOM_SETTLED_CONSULTS_KEPT,
   PAIR_ROOM_TEXT_MAX_LENGTH,
   PAIR_ROOM_TITLE_MAX_LENGTH,
@@ -47,7 +49,8 @@ export type PairRejectionReason =
   | "round-limit"
   | "scope-overlap"
   | "scope-deviation"
-  | "decision-authority";
+  | "decision-authority"
+  | "lead-switching";
 
 export interface PairRejection {
   readonly reason: PairRejectionReason;
@@ -174,7 +177,22 @@ export type PairRoomCommand =
       readonly resolution: string;
       readonly resolvedBy: "lead" | "user";
       readonly at: string;
-    };
+    }
+  | { readonly type: "lead.switch-start"; readonly roomId: PairRoomId; readonly at: string }
+  | {
+      readonly type: "lead.switch-draft";
+      readonly roomId: PairRoomId;
+      readonly handoff: string | null;
+      readonly error: string | null;
+      readonly at: string;
+    }
+  | {
+      readonly type: "lead.switch-confirm";
+      readonly roomId: PairRoomId;
+      readonly newLeadThreadId: ThreadId;
+      readonly at: string;
+    }
+  | { readonly type: "lead.switch-cancel"; readonly roomId: PairRoomId; readonly at: string };
 
 export type PairDecideResult =
   | { readonly ok: true; readonly room: PairRoom }
@@ -293,6 +311,15 @@ const ASSIGNMENT_TRANSITIONS: Readonly<
 
 // ── Decider ─────────────────────────────────────────────────────────────
 
+/** Whether a thread was ever part of a room, including threads retired by a Lead switch. */
+const everInPairRoom = (rooms: Iterable<PairRoom>, threadId: ThreadId): boolean => {
+  for (const room of rooms) {
+    if (room.formerParticipants.some((former) => former.threadId === threadId)) return true;
+  }
+  return findPairRoomByThread(rooms, threadId) !== undefined;
+};
+
+/** The room a live participant or assignment thread belongs to. Former threads do not count. */
 export const findPairRoomByThread = (
   rooms: Iterable<PairRoom>,
   threadId: ThreadId,
@@ -314,6 +341,13 @@ const requireWritable = (room: PairRoom): PairRejection | null => {
       detail: room.statusReason
         ? `This pair room is paused: ${room.statusReason}`
         : "This pair room is paused until the user resumes it.",
+    };
+  }
+  if (room.leadSwitch !== null && room.leadSwitch.phase !== "failed") {
+    return {
+      reason: "lead-switching",
+      detail:
+        "The user is switching this room's Lead. Finish or stop the current step and wait for the switch.",
     };
   }
   return null;
@@ -370,7 +404,7 @@ export function decidePairRoom(
     if (rooms.has(command.roomId)) {
       return reject("conflict", `Pair room ${command.roomId} already exists.`);
     }
-    if (findPairRoomByThread(rooms.values(), command.leadThreadId)) {
+    if (everInPairRoom([...rooms.values()], command.leadThreadId)) {
       return reject("conflict", "That thread already belongs to a pair room.");
     }
     return accept({
@@ -389,6 +423,8 @@ export function decidePairRoom(
       consults: [],
       assignments: [],
       decisions: [],
+      leadSwitch: null,
+      formerParticipants: [],
       createdAt: command.at,
       updatedAt: command.at,
     });
@@ -688,6 +724,92 @@ export function decidePairRoom(
           updatedAt: command.at,
         }),
       });
+    }
+
+    case "lead.switch-start": {
+      const blocked = requireWritable(room);
+      if (blocked) return { ok: false, rejection: blocked };
+      if (room.consults.some((consult) => consult.status === "running")) {
+        return reject(
+          "peer-busy",
+          "The Peer is answering a consult. Cancel it or wait before switching the Lead.",
+        );
+      }
+      const lead = pairRoomParticipant(room, "lead");
+      if (!lead?.threadId) return reject("invalid", "The pair room has no Lead thread yet.");
+      return accept({
+        ...room,
+        ...touched,
+        leadSwitch: {
+          toPersona: otherPairPersona(lead.persona),
+          phase: "drafting",
+          requestedAt: command.at,
+          handoff: null,
+          error: null,
+        },
+      });
+    }
+
+    case "lead.switch-draft": {
+      if (room.leadSwitch?.phase !== "drafting") {
+        return reject("invalid", "No Lead handoff is being drafted.");
+      }
+      const handoff = command.handoff?.trim()
+        ? clampPairText(command.handoff, PAIR_ROOM_HANDOFF_MAX_LENGTH)
+        : null;
+      return accept({
+        ...room,
+        ...touched,
+        leadSwitch: {
+          ...room.leadSwitch,
+          phase: handoff === null ? "failed" : "ready",
+          handoff,
+          error:
+            handoff === null
+              ? clampPairText(command.error ?? "The Lead did not write a handoff.")
+              : null,
+        },
+      });
+    }
+
+    case "lead.switch-confirm": {
+      if (room.leadSwitch?.phase !== "ready") {
+        return reject("invalid", "The handoff is not ready to confirm yet.");
+      }
+      const lead = pairRoomParticipant(room, "lead");
+      const peer = pairRoomParticipant(room, "peer");
+      if (!lead || !peer) return reject("invalid", "The pair room is missing a participant.");
+      const retired = [lead, peer].flatMap((participant) =>
+        participant.threadId
+          ? [
+              {
+                persona: participant.persona,
+                role: participant.role,
+                threadId: participant.threadId,
+                until: command.at,
+              },
+            ]
+          : [],
+      );
+      return accept({
+        ...room,
+        ...touched,
+        participants: [
+          { persona: room.leadSwitch.toPersona, role: "lead", threadId: command.newLeadThreadId },
+          // The new Peer gets a fresh thread in the review worktree on its first consult.
+          { persona: lead.persona, role: "peer", threadId: null },
+        ],
+        extraRounds: null,
+        leadSwitch: null,
+        formerParticipants: [...room.formerParticipants, ...retired].slice(
+          -PAIR_ROOM_FORMER_PARTICIPANTS_KEPT,
+        ),
+      });
+    }
+
+    case "lead.switch-cancel": {
+      if (room.leadSwitch === null) return accept(room);
+      return accept({ ...room, ...touched, leadSwitch: null });
     }
   }
 }

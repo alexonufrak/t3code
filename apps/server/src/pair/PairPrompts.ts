@@ -128,3 +128,56 @@ export function roleGuidance(input: {
       return "You are working a bounded assignment. Stay inside its scope, report blockers with pair_report_progress, and finish with pair_submit.";
   }
 }
+
+export const handoffRequest = (input: { readonly from: PairPersona; readonly to: PairPersona }) =>
+  [
+    `Pair Room: the user is handing the Lead role from ${name(input.from)} to ${name(input.to)}.`,
+    "Do not start new work, consult or assign. Write a handoff that lets the new Lead continue without this thread's history. Your reply is the handoff, and the user reads it before confirming.",
+    "Use these sections, with file paths, commands and branch names where they apply:",
+    "- Objective",
+    "- Plan",
+    "- Done",
+    "- In progress",
+    "- Changed files",
+    "- Tests run and their results",
+    "- Decisions and disagreements",
+    "- Risks",
+    "- Open questions for the user",
+    "- Next actions",
+  ].join("\n");
+
+export interface HandoffFacts {
+  readonly assignments: ReadonlyArray<PairAssignment>;
+  readonly openDecisions: ReadonlyArray<{ readonly title: string; readonly category: string }>;
+  readonly cwd: string;
+  readonly branch: string | null;
+}
+
+export function leadHandoff(input: {
+  readonly from: PairPersona;
+  readonly to: PairPersona;
+  readonly handoff: string;
+  readonly facts: HandoffFacts;
+}): string {
+  const assignments = input.facts.assignments.map(
+    (assignment) =>
+      `${assignment.title} (${name(assignment.owner)}, ${assignment.state}, branch ${assignment.branch})`,
+  );
+  const decisions = input.facts.openDecisions.map(
+    (decision) => `${decision.title} (${decision.category})`,
+  );
+  return [
+    `Pair Room: you are ${name(input.to)}, and you are now the Lead. ${name(input.from)} led until now and is your Peer from here on. The user confirmed this handoff.`,
+    `Your working directory is the room's checkout (${input.facts.cwd}${input.facts.branch ? `, branch ${input.facts.branch}` : ""}). Call pair_status first.`,
+    "",
+    `Handoff from ${name(input.from)}:`,
+    "",
+    input.handoff,
+    "",
+    `Assignments, as the server records them:\n${bulletList(assignments)}`,
+    "",
+    `Open decisions:\n${bulletList(decisions)}`,
+    "",
+    "Assignments keep their owners. Confirm your understanding with the user in a short reply before you change anything.",
+  ].join("\n");
+}

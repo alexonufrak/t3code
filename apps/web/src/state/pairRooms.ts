@@ -91,6 +91,10 @@ const pairRoomSidebarIndexAtom = Atom.make((get): PairRoomSidebarIndex => {
         parents.set(keyOf(assignment.threadId), leadKey);
         labels.set(keyOf(assignment.threadId), "Assignment");
       }
+      for (const former of room.formerParticipants) {
+        parents.set(keyOf(former.threadId), leadKey);
+        labels.set(keyOf(former.threadId), "Earlier");
+      }
     }
   }
   return labels.size === 0 ? EMPTY_SIDEBAR_INDEX : { parents, labels };

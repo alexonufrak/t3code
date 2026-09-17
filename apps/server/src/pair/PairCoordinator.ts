@@ -38,6 +38,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -47,6 +48,8 @@ import * as ProviderService from "../provider/Services/ProviderService.ts";
 import {
   assignmentBrief,
   consultPrompt,
+  handoffRequest,
+  leadHandoff,
   resumeRequest,
   revisionRequest,
   roleGuidance,
@@ -475,20 +478,24 @@ export const make = Effect.gen(function* () {
 
   // ── Consults ────────────────────────────────────────────────────────
 
-  /** The Peer's outcome for a consult, once its turn has settled. */
-  const readPeerOutcome = (
-    peerThreadId: ThreadId,
-    consult: PairConsult,
+  /**
+   * How the latest turn requested at or after `since` ended, once it has.
+   * `speaker` names whose turn it is in the error text.
+   */
+  const readTurnOutcome = (
+    threadId: ThreadId,
+    since: string,
+    speaker: string,
   ): Effect.Effect<Option.Option<PeerOutcome>, PairInternalError> =>
     Effect.gen(function* () {
-      const shell = Option.getOrUndefined(yield* threadShell(peerThreadId));
+      const shell = Option.getOrUndefined(yield* threadShell(threadId));
       const turn = shell?.latestTurn;
-      if (turn && turn.requestedAt >= consult.requestedAt && turn.state !== "running") {
+      if (turn && turn.requestedAt >= since && turn.state !== "running") {
         if (turn.state !== "completed") {
           return Option.some<PeerOutcome>({
             status: "failed",
             peerTurnId: turn.turnId,
-            error: `The Peer's turn ended as ${turn.state}.`,
+            error: `${speaker}'s turn ended as ${turn.state}.`,
           });
         }
         return Option.some<PeerOutcome>({
@@ -498,31 +505,39 @@ export const make = Effect.gen(function* () {
         });
       }
       const session = shell?.session;
-      if (session?.status === "error" && session.updatedAt >= consult.requestedAt) {
+      if (session?.status === "error" && session.updatedAt >= since) {
         return Option.some<PeerOutcome>({
           status: "failed",
           peerTurnId: null,
-          error: session.lastError ?? "The Peer's session failed.",
+          error: session.lastError ?? `${speaker}'s session failed.`,
         });
       }
       return Option.none<PeerOutcome>();
+    });
+
+  /** The Peer's outcome for a consult, once its turn has settled. */
+  const readPeerOutcome = (peerThreadId: ThreadId, consult: PairConsult) =>
+    readTurnOutcome(peerThreadId, consult.requestedAt, "The Peer");
+
+  /** The final assistant message of a finished turn. */
+  const readTurnText = (threadId: ThreadId, turnId: TurnId) =>
+    Effect.gen(function* () {
+      const detail = yield* snapshots
+        .getThreadDetailById(threadId)
+        .pipe(Effect.mapError(internal("read answer")));
+      return (
+        Option.getOrUndefined(detail)?.messages.findLast(
+          (message) =>
+            message.role === "assistant" && message.turnId === turnId && !message.streaming,
+        )?.text ?? null
+      );
     });
 
   const readAnswer = (room: PairRoom, consult: PairConsult) =>
     Effect.gen(function* () {
       const peerThreadId = pairRoomParticipant(room, "peer")?.threadId;
       if (!peerThreadId || !consult.peerTurnId) return null;
-      const detail = yield* snapshots
-        .getThreadDetailById(peerThreadId)
-        .pipe(Effect.mapError(internal("read answer")));
-      return (
-        Option.getOrUndefined(detail)?.messages.findLast(
-          (message) =>
-            message.role === "assistant" &&
-            message.turnId === consult.peerTurnId &&
-            !message.streaming,
-        )?.text ?? null
-      );
+      return yield* readTurnText(peerThreadId, consult.peerTurnId);
     });
 
   const settleConsult = (
@@ -1565,16 +1580,147 @@ export const make = Effect.gen(function* () {
           });
           return room.roomId;
         }
+        case "lead.switch-start": {
+          const room = yield* requireRoom(command.roomId);
+          const lead = yield* leadContext(room);
+          if (lead.activeTurnId) {
+            return yield* rejected(
+              "conflict",
+              `${personaName(lead.persona)} is still working. Wait for its turn to end or stop it, then switch.`,
+            );
+          }
+          const next = yield* apply({ type: "lead.switch-start", roomId: room.roomId, at });
+          yield* startTurn({
+            commandKey: `pair:${room.roomId}:handoff-request:${yield* uuid}`,
+            threadId: lead.threadId,
+            persona: lead.persona,
+            runtimeMode: lead.shell.runtimeMode,
+            text: handoffRequest({ from: lead.persona, to: next.leadSwitch!.toPersona }),
+            createdAt: at,
+          }).pipe(
+            Effect.catch((error: PairFailure) =>
+              apply({
+                type: "lead.switch-draft",
+                roomId: room.roomId,
+                handoff: null,
+                error: `Could not ask for a handoff: ${error._tag === "PairRoomRejectedError" ? error.detail : error.message}`,
+                at,
+              }),
+            ),
+          );
+          return room.roomId;
+        }
+        case "lead.switch-confirm": {
+          const room = yield* requireRoom(command.roomId);
+          const handoff = room.leadSwitch?.phase === "ready" ? room.leadSwitch.handoff : null;
+          if (!room.leadSwitch || handoff === null) {
+            return yield* rejected("invalid", "The handoff is not ready to confirm yet.");
+          }
+          const lead = yield* leadContext(room);
+          if (lead.activeTurnId) {
+            return yield* rejected(
+              "conflict",
+              `${personaName(lead.persona)} started another turn. Wait for it to end, then confirm.`,
+            );
+          }
+          const toPersona = room.leadSwitch.toPersona;
+          const newLeadThreadId = ThreadId.make(yield* uuid);
+          // The new Lead gets its own thread in the same checkout. The old
+          // threads stay as history; resuming a provider session in another
+          // directory would lose its context anyway, and the handoff carries it.
+          yield* orchestrate({
+            type: "thread.create",
+            commandId: CommandId.make(`pair:${room.roomId}:lead-thread:${newLeadThreadId}`),
+            threadId: newLeadThreadId,
+            projectId: room.projectId,
+            title: lead.shell.title,
+            modelSelection: modelSelectionFor(toPersona),
+            runtimeMode: lead.shell.runtimeMode,
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            branch: lead.shell.branch,
+            worktreePath: lead.shell.worktreePath,
+            createdAt: at,
+          });
+          const next = yield* apply({
+            type: "lead.switch-confirm",
+            roomId: room.roomId,
+            newLeadThreadId,
+            at,
+          });
+          yield* startTurn({
+            commandKey: `pair:${room.roomId}:handoff:${newLeadThreadId}`,
+            threadId: newLeadThreadId,
+            persona: toPersona,
+            runtimeMode: lead.shell.runtimeMode,
+            text: leadHandoff({
+              from: lead.persona,
+              to: toPersona,
+              handoff,
+              facts: {
+                assignments: next.assignments.filter(
+                  (assignment) =>
+                    PAIR_ASSIGNMENT_ACTIVE_STATES.has(assignment.state) ||
+                    assignment.state === "interrupted",
+                ),
+                openDecisions: next.decisions.filter((decision) => decision.resolution === null),
+                cwd: lead.cwd,
+                branch: lead.shell.branch,
+              },
+            }),
+            createdAt: at,
+          });
+          return { roomId: room.roomId, threadId: newLeadThreadId };
+        }
+        case "lead.switch-cancel": {
+          const room = yield* requireRoom(command.roomId);
+          const leadThreadId = pairRoomParticipant(room, "lead")?.threadId;
+          if (room.leadSwitch?.phase === "drafting" && leadThreadId) {
+            yield* interruptIfRunning(
+              leadThreadId,
+              `pair:${room.roomId}:handoff-cancel:${yield* uuid}`,
+            );
+          }
+          yield* apply({ type: "lead.switch-cancel", roomId: room.roomId, at });
+          return room.roomId;
+        }
       }
     });
 
   const dispatchUserCommand: PairCoordinator["Service"]["dispatchUserCommand"] = (command) =>
     runUserCommand(command).pipe(
-      Effect.map((roomId) => ({ roomId })),
+      Effect.map((result): PairRoomDispatchResult =>
+        typeof result === "string" ? { roomId: result } : result,
+      ),
       Effect.mapError(userCommandError),
     );
 
   // ── Reactions ───────────────────────────────────────────────────────
+
+  /** Stores the outgoing Lead's handoff once its handoff turn ends. */
+  const settleHandoffDraft = (room: PairRoom, threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const lead = pairRoomParticipant(room, "lead");
+      if (room.leadSwitch?.phase !== "drafting" || lead?.threadId !== threadId) return false;
+      const outcome = yield* readTurnOutcome(
+        threadId,
+        room.leadSwitch.requestedAt,
+        personaName(lead.persona),
+      );
+      if (Option.isNone(outcome)) return false;
+      const turnId = outcome.value.peerTurnId;
+      const handoff =
+        outcome.value.status === "answered" && turnId
+          ? yield* readTurnText(threadId, turnId)
+          : null;
+      yield* apply({
+        type: "lead.switch-draft",
+        roomId: room.roomId,
+        handoff,
+        error: outcome.value.error,
+        at: yield* nowIso,
+      });
+      return true;
+    });
 
   const settleIfAnswered = (room: PairRoom, threadId: ThreadId) =>
     Effect.gen(function* () {
@@ -1681,6 +1827,60 @@ export const make = Effect.gen(function* () {
       });
     });
 
+  const waitingOnUser = yield* Ref.make(new Set<ThreadId>());
+  const WAITING_ACTIVITY_KINDS = new Set([
+    "approval.requested",
+    "approval.resolved",
+    "user-input.requested",
+    "user-input.resolved",
+  ]);
+
+  /**
+   * Peer and assignment threads run out of the user's sight, so an approval
+   * or question there is mirrored onto its card in the Lead's thread.
+   */
+  const mirrorWaitingOnUser = (room: PairRoom, threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const peer = pairRoomParticipant(room, "peer");
+      const consult =
+        peer?.threadId === threadId
+          ? room.consults.find((entry) => entry.status === "running")
+          : undefined;
+      const assignment = room.assignments.find(
+        (entry) => entry.threadId === threadId && PAIR_ASSIGNMENT_ACTIVE_STATES.has(entry.state),
+      );
+      const card =
+        consult && peer
+          ? consultCard(consult, peer.persona)
+          : assignment
+            ? assignmentCard(assignment)
+            : null;
+      if (!card) return;
+      const shell = Option.getOrUndefined(yield* threadShell(threadId));
+      if (!shell) return;
+      const waiting = shell.hasPendingApprovals || shell.hasPendingUserInput;
+      const changed = yield* Ref.modify(waitingOnUser, (current) => {
+        if (current.has(threadId) === waiting) return [false, current] as const;
+        const next = new Set(current);
+        if (waiting) next.add(threadId);
+        else next.delete(threadId);
+        return [true, next] as const;
+      });
+      if (!changed) return;
+      const what = shell.hasPendingApprovals ? "approval" : "answer";
+      yield* mirror(room, {
+        kind: "task.progress",
+        summary: waiting ? `${card.persona} is waiting for you` : `${card.persona} is continuing`,
+        payload: pairMirrorProgressPayload(card, {
+          status: waiting ? "waiting" : "running",
+          summary: waiting
+            ? `Waiting for your ${what} in ${card.persona}'s thread.`
+            : "Continuing.",
+        }),
+        turnId: null,
+      });
+    });
+
   /**
    * Deleting the Lead's thread ends the room, since nothing can speak for it.
    * Deleting an assignment thread cancels that assignment.
@@ -1717,7 +1917,15 @@ export const make = Effect.gen(function* () {
         yield* handleThreadDeleted(found.value, threadId);
         return;
       }
+      if (
+        event.type === "thread.activity-appended" &&
+        WAITING_ACTIVITY_KINDS.has(event.payload.activity.kind)
+      ) {
+        yield* mirrorWaitingOnUser(found.value, threadId);
+        return;
+      }
       yield* settleIfAnswered(found.value, threadId);
+      yield* settleHandoffDraft(found.value, threadId);
       if (event.type === "thread.turn-diff-completed") {
         const room = Option.getOrElse(yield* store.get(found.value.roomId), () => found.value);
         yield* reviewGuardrail(room, event);
@@ -1757,6 +1965,20 @@ export const make = Effect.gen(function* () {
   /** Domain events are live-only, so anything in flight when the server stopped is settled here. */
   const reconcile = Effect.gen(function* () {
     for (const room of yield* store.list) {
+      const leadThreadId = pairRoomParticipant(room, "lead")?.threadId;
+      if (room.leadSwitch?.phase === "drafting" && leadThreadId) {
+        const settled = yield* settleHandoffDraft(room, leadThreadId);
+        const shell = Option.getOrUndefined(yield* threadShell(leadThreadId));
+        if (!settled && !(shell && isRunningTurn(shell))) {
+          yield* apply({
+            type: "lead.switch-draft",
+            roomId: room.roomId,
+            handoff: null,
+            error: "The server restarted before the handoff was written. Start the switch again.",
+            at: yield* nowIso,
+          });
+        }
+      }
       const running = room.consults.find((consult) => consult.status === "running");
       const peerThreadId = pairRoomParticipant(room, "peer")?.threadId;
       if (running) {

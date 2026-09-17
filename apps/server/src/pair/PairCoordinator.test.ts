@@ -115,6 +115,8 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
   );
   const messages = yield* Ref.make(new Map<ThreadId, OrchestrationThread["messages"]>());
   const domainEvents = yield* PubSub.unbounded<OrchestrationEvent>();
+  // Every dispatched command, replayed so a test can wait on one that already landed.
+  const dispatched = yield* PubSub.unbounded<OrchestrationCommand>({ replay: 64 });
   // Replay covers the coordinator subscribing to runtime events after a test publishes one.
   const runtimeEvents = yield* PubSub.unbounded<ProviderRuntimeEvent>({ replay: 8 });
   const changedFiles = yield* Ref.make<ReadonlyArray<string>>([]);
@@ -129,6 +131,7 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
       dispatch: (command) =>
         Effect.gen(function* () {
           yield* Ref.update(commands, (all) => [...all, command]);
+          yield* PubSub.publish(dispatched, command);
           if (command.type === "thread.create") {
             yield* Ref.update(shells, (all) =>
               new Map(all).set(
@@ -202,6 +205,14 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
       ),
     );
 
+  /** Resolves with the first dispatched command matching `predicate`; the receipt tests wait on. */
+  const commandWhere = (predicate: (command: OrchestrationCommand) => boolean) =>
+    Stream.fromPubSub(dispatched).pipe(
+      Stream.filter(predicate),
+      Stream.runHead,
+      Effect.map(Option.getOrThrow),
+    );
+
   const setShell = (threadId: ThreadId, update: Partial<OrchestrationThreadShell>) =>
     Ref.update(shells, (all) => new Map(all).set(threadId, { ...all.get(threadId)!, ...update }));
 
@@ -259,6 +270,7 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
     coordinator,
     store,
     recorded,
+    commandWhere,
     setShell,
     finishTurn,
     roomWhere,
@@ -568,6 +580,104 @@ describe("PairCoordinator", () => {
         expect(paused.statusReason).toContain("claude-sonnet-5");
         const refused = yield* harness.coordinator.consult(LEAD, { question: "Still there?" });
         expect(refused).toMatchObject({ status: "rejected", reason: "room-paused" });
+      }),
+    ),
+  );
+
+  it.effect("mirrors a Peer approval wait onto the consult card in the Lead's thread", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        const roomId = yield* harness.createRoom();
+        const pending = yield* harness.coordinator.consult(LEAD, {
+          question: "Can you run the migration check?",
+          waitSeconds: 0,
+        });
+        const peerThreadId = yield* peerThreadOf(harness.store, roomId);
+        const approvalEvent = (kind: string) =>
+          threadEvent("thread.activity-appended", peerThreadId, {
+            activity: { kind, payload: {} },
+          });
+        const progressFor = (status: string) => (command: OrchestrationCommand) =>
+          command.type === "thread.activity.append" &&
+          command.threadId === LEAD &&
+          command.activity.kind === "task.progress" &&
+          (command.activity.payload as { status?: string }).status === status;
+
+        yield* harness.setShell(peerThreadId, { hasPendingApprovals: true });
+        yield* PubSub.publish(harness.domainEvents, approvalEvent("approval.requested"));
+        const waiting = yield* harness.commandWhere(progressFor("waiting"));
+        expect(waiting).toMatchObject({
+          activity: {
+            payload: {
+              taskId: pending.handle,
+              summary: "Waiting for your approval in Astra's thread.",
+            },
+          },
+        });
+
+        yield* harness.setShell(peerThreadId, { hasPendingApprovals: false });
+        yield* PubSub.publish(harness.domainEvents, approvalEvent("approval.resolved"));
+        const resumed = yield* harness.commandWhere(progressFor("running"));
+        expect(resumed).toMatchObject({ activity: { payload: { taskId: pending.handle } } });
+      }),
+    ),
+  );
+
+  it.effect("switches the Lead through a handoff the user confirms", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        const roomId = yield* harness.createRoom();
+        const busy = yield* Effect.flip(
+          harness.coordinator.dispatchUserCommand({ type: "lead.switch-start", roomId }),
+        );
+        expect(busy).toMatchObject({ reason: "conflict" });
+
+        yield* harness.setShell(LEAD, {
+          session: runningSession(LEAD, null),
+          worktreePath: "/worktrees/repo/lead",
+          branch: "feature/retries",
+        });
+        yield* harness.coordinator.dispatchUserCommand({ type: "lead.switch-start", roomId });
+        const request = (yield* harness.recorded("thread.turn.start")).at(-1);
+        expect(request?.threadId).toBe(LEAD);
+        expect(request?.message.text).toContain("handing the Lead role from Fable to Astra");
+        const refused = yield* harness.coordinator.consult(LEAD, { question: "Still there?" });
+        expect(refused).toMatchObject({ status: "rejected", reason: "lead-switching" });
+
+        yield* harness.finishTurn({
+          threadId: LEAD,
+          state: "completed",
+          answer: "Objective: retry 429s with backoff. Next: add jitter.",
+        });
+        const ready = yield* harness.roomWhere(
+          (room) => room.roomId === roomId && room.leadSwitch?.phase === "ready",
+        );
+        expect(ready.leadSwitch?.handoff).toContain("add jitter");
+
+        const confirmed = yield* harness.coordinator.dispatchUserCommand({
+          type: "lead.switch-confirm",
+          roomId,
+        });
+        const newLead = confirmed.threadId!;
+        const create = (yield* harness.recorded("thread.create")).at(-1);
+        expect(create).toMatchObject({
+          threadId: newLead,
+          modelSelection: { instanceId: "codex", model: "gpt-6-astra" },
+          worktreePath: "/worktrees/repo/lead",
+          branch: "feature/retries",
+        });
+        const room = Option.getOrThrow(yield* harness.store.get(roomId));
+        expect(room.participants).toEqual([
+          { persona: "astra", role: "lead", threadId: newLead },
+          { persona: "fable", role: "peer", threadId: null },
+        ]);
+        expect(room.formerParticipants).toMatchObject([{ persona: "fable", threadId: LEAD }]);
+        const handoffTurn = (yield* harness.recorded("thread.turn.start")).at(-1);
+        expect(handoffTurn?.threadId).toBe(newLead);
+        expect(handoffTurn?.message.text).toContain("you are Astra, and you are now the Lead");
+        expect(handoffTurn?.message.text).toContain("add jitter");
       }),
     ),
   );

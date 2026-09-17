@@ -10,6 +10,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   decidePairRoom,
+  findPairRoomByThread,
   pairScopeDeviations,
   pairScopesOverlap,
   type PairRoomCommand,
@@ -370,5 +371,107 @@ describe("pair scopes", () => {
         ["src/api", "docs/*.md"],
       ),
     ).toEqual(["src/web/app.tsx"]);
+  });
+});
+
+describe("lead switch", () => {
+  const PEER_THREAD = ThreadId.make("peer-thread");
+  const NEW_LEAD_THREAD = ThreadId.make("new-lead-thread");
+
+  it("holds the room while the handoff is drafted, then swaps roles only on confirm", () => {
+    const rooms = createRoom();
+    apply(rooms, {
+      type: "peer.attach",
+      roomId: ROOM_ID,
+      threadId: PEER_THREAD,
+      reviewWorktreePath: "/worktrees/review",
+      at: AT,
+    });
+    const started = apply(rooms, { type: "lead.switch-start", roomId: ROOM_ID, at: AT });
+    expect(started.leadSwitch).toMatchObject({ toPersona: "astra", phase: "drafting" });
+    expect(rejectionOf(rooms, consult("during-switch")).reason).toBe("lead-switching");
+    expect(
+      rejectionOf(rooms, {
+        type: "lead.switch-confirm",
+        roomId: ROOM_ID,
+        newLeadThreadId: NEW_LEAD_THREAD,
+        at: AT,
+      }).reason,
+    ).toBe("invalid");
+
+    const drafted = apply(rooms, {
+      type: "lead.switch-draft",
+      roomId: ROOM_ID,
+      handoff: "Objective: ship retries.",
+      error: null,
+      at: AT,
+    });
+    expect(drafted.leadSwitch).toMatchObject({
+      phase: "ready",
+      handoff: "Objective: ship retries.",
+    });
+
+    const switched = apply(rooms, {
+      type: "lead.switch-confirm",
+      roomId: ROOM_ID,
+      newLeadThreadId: NEW_LEAD_THREAD,
+      at: AT,
+    });
+    expect(switched.participants).toEqual([
+      { persona: "astra", role: "lead", threadId: NEW_LEAD_THREAD },
+      { persona: "fable", role: "peer", threadId: null },
+    ]);
+    expect(switched.leadSwitch).toBeNull();
+    expect(switched.formerParticipants.map((former) => former.threadId)).toEqual([
+      LEAD_THREAD,
+      PEER_THREAD,
+    ]);
+    // Retired threads keep no pair tools and cannot start another room.
+    expect(findPairRoomByThread(rooms.values(), LEAD_THREAD)).toBeUndefined();
+    expect(findPairRoomByThread(rooms.values(), NEW_LEAD_THREAD)?.roomId).toBe(ROOM_ID);
+    expect(
+      rejectionOf(rooms, {
+        type: "room.create",
+        roomId: PairRoomId.make("room-2"),
+        projectId: ProjectId.make("project-1"),
+        leadThreadId: LEAD_THREAD,
+        leadPersona: "fable",
+        mode: "adaptive",
+        at: AT,
+      }).reason,
+    ).toBe("conflict");
+  });
+
+  it("marks a draft without a handoff failed, which frees the room and allows a retry", () => {
+    const rooms = createRoom();
+    apply(rooms, { type: "lead.switch-start", roomId: ROOM_ID, at: AT });
+    const failed = apply(rooms, {
+      type: "lead.switch-draft",
+      roomId: ROOM_ID,
+      handoff: "   ",
+      error: "Fable's turn ended as error.",
+      at: AT,
+    });
+    expect(failed.leadSwitch).toMatchObject({
+      phase: "failed",
+      handoff: null,
+      error: "Fable's turn ended as error.",
+    });
+    apply(rooms, consult("after-failure"));
+    apply(rooms, {
+      type: "consult.settle",
+      roomId: ROOM_ID,
+      consultId: "after-failure",
+      status: "answered",
+      peerTurnId: null,
+      error: null,
+      at: AT,
+    });
+    expect(
+      apply(rooms, { type: "lead.switch-start", roomId: ROOM_ID, at: AT }).leadSwitch?.phase,
+    ).toBe("drafting");
+    expect(
+      apply(rooms, { type: "lead.switch-cancel", roomId: ROOM_ID, at: AT }).leadSwitch,
+    ).toBeNull();
   });
 });
