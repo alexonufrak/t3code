@@ -261,7 +261,7 @@ import {
   PairRoomCommandError,
   PairRoomDispatchResult,
   PairRoomUserCommand,
-  PairRoomsStreamItem,
+  PairRoomListEvent,
   PairRoomsSubscribeInput,
 } from "./pairRoom.ts";
 import {
@@ -904,7 +904,7 @@ const WsPairRoomDispatchRpc = Rpc.make(WS_METHODS.pairRoomDispatch, {
 
 const WsSubscribePairRoomsRpc = Rpc.make(WS_METHODS.subscribePairRooms, {
   payload: PairRoomsSubscribeInput,
-  success: PairRoomsStreamItem,
+  success: PairRoomListEvent,
   error: EnvironmentAuthorizationError,
   stream: true,
 });

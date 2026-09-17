@@ -3,6 +3,7 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
   MessageId,
+  PAIR_ASSIGNMENT_ACTIVE_STATES,
   PAIR_PERSONAS,
   PairRoomCommandError,
   PairRoomId,
@@ -1680,12 +1681,42 @@ export const make = Effect.gen(function* () {
       });
     });
 
+  /**
+   * Deleting the Lead's thread ends the room, since nothing can speak for it.
+   * Deleting an assignment thread cancels that assignment.
+   */
+  const handleThreadDeleted = (room: PairRoom, threadId: ThreadId) =>
+    Effect.gen(function* () {
+      if (pairRoomParticipant(room, "lead")?.threadId === threadId) {
+        if (room.status === "closed") return;
+        yield* apply({
+          type: "room.update",
+          roomId: room.roomId,
+          status: "closed",
+          statusReason: "The Lead's thread was deleted.",
+          at: yield* nowIso,
+        });
+        return;
+      }
+      const assignment = room.assignments.find((entry) => entry.threadId === threadId);
+      if (assignment && PAIR_ASSIGNMENT_ACTIVE_STATES.has(assignment.state)) {
+        yield* updateAssignment(room, assignment, {
+          state: "cancelled",
+          note: "The assignment's thread was deleted.",
+        });
+      }
+    });
+
   const handleEvent = (event: OrchestrationEvent) =>
     Effect.gen(function* () {
       if (event.aggregateKind !== "thread") return;
       const threadId = ThreadId.make(event.aggregateId);
       const found = yield* store.findByThread(threadId);
       if (Option.isNone(found)) return;
+      if (event.type === "thread.deleted") {
+        yield* handleThreadDeleted(found.value, threadId);
+        return;
+      }
       yield* settleIfAnswered(found.value, threadId);
       if (event.type === "thread.turn-diff-completed") {
         const room = Option.getOrElse(yield* store.get(found.value.roomId), () => found.value);

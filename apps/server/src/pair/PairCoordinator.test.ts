@@ -238,7 +238,7 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
   /** Resolves once a room change satisfies `predicate`; the receipt tests wait on. */
   const roomWhere = (predicate: (room: PairRoom) => boolean) =>
     store.streamRooms.pipe(
-      Stream.flatMap((item) => Stream.fromIterable(item.rooms)),
+      Stream.flatMap((rooms) => Stream.fromIterable(rooms)),
       Stream.filter(predicate),
       Stream.runHead,
       Effect.map(Option.getOrThrow),
@@ -568,6 +568,23 @@ describe("PairCoordinator", () => {
         expect(paused.statusReason).toContain("claude-sonnet-5");
         const refused = yield* harness.coordinator.consult(LEAD, { question: "Still there?" });
         expect(refused).toMatchObject({ status: "rejected", reason: "room-paused" });
+      }),
+    ),
+  );
+
+  it.effect("closes the room when the Lead's thread is deleted", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        const roomId = yield* harness.createRoom();
+        yield* PubSub.publish(
+          harness.domainEvents,
+          threadEvent("thread.deleted", LEAD, { deletedAt: "1970-01-01T00:00:01.000Z" }),
+        );
+        const closed = yield* harness.roomWhere(
+          (room) => room.roomId === roomId && room.status === "closed",
+        );
+        expect(closed.statusReason).toBe("The Lead's thread was deleted.");
       }),
     ),
   );

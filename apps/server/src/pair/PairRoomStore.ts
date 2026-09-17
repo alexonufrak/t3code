@@ -1,7 +1,7 @@
 import {
   PairRoom,
   type PairRoomId,
-  type PairRoomsStreamItem,
+  type PairRoomListEvent,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -60,7 +60,8 @@ export class PairRoomStore extends Context.Service<
     ) => Effect.Effect<PairRoom, PairRoomRejectedError | PairRoomPersistenceError>;
     /** Live changes after subscription. Use `streamRooms` for a replayable client stream. */
     readonly subscribeChanges: Effect.Effect<Stream.Stream<PairRoomChange>, never, Scope.Scope>;
-    readonly streamRooms: Stream.Stream<PairRoomsStreamItem>;
+    /** Every room now, then again after each change. */
+    readonly streamRooms: Stream.Stream<PairRoomListEvent>;
   }
 >()("t3/pair/PairRoomStore") {}
 
@@ -130,32 +131,21 @@ export const make = Effect.gen(function* () {
       }),
     );
 
-  const streamRooms = Stream.callback<PairRoomsStreamItem>((mailbox) =>
-    Effect.gen(function* () {
-      const subscription = yield* PubSub.subscribe(changes);
-      // Taken after subscribing, so every later change is in the subscription.
-      const snapshotSequence = sequence;
-      Queue.offerUnsafe(mailbox, {
-        replace: true,
-        rooms: [...rooms.values()],
-        removedRoomIds: [],
-        sequence: snapshotSequence,
-      });
-      yield* Stream.fromSubscription(subscription).pipe(
-        Stream.filter((change) => change.sequence > snapshotSequence),
-        Stream.runForEach((change) =>
-          Effect.sync(() =>
-            Queue.offerUnsafe(mailbox, {
-              replace: false,
-              rooms: [change.room],
-              removedRoomIds: [],
-              sequence: change.sequence,
-            }),
+  // One-slot sliding mailbox per subscriber: lists are whole states, so a slow
+  // socket skipping intermediates still ends on the latest rooms.
+  const streamRooms = Stream.callback<PairRoomListEvent>(
+    (mailbox) =>
+      Effect.gen(function* () {
+        const subscription = yield* PubSub.subscribe(changes);
+        Queue.offerUnsafe(mailbox, [...rooms.values()]);
+        yield* Stream.fromSubscription(subscription).pipe(
+          Stream.runForEach(() =>
+            Effect.sync(() => Queue.offerUnsafe(mailbox, [...rooms.values()])),
           ),
-        ),
-        Effect.forkScoped,
-      );
-    }),
+          Effect.forkScoped,
+        );
+      }),
+    { bufferSize: 1, strategy: "sliding" },
   );
 
   return PairRoomStore.of({

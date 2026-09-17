@@ -3,7 +3,7 @@ import {
   ProjectId,
   ThreadId,
   TurnId,
-  type PairRoomsStreamItem,
+  type PairRoomListEvent,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -73,12 +73,12 @@ it.layer(SqlitePersistenceMemory)("PairRoomStore", (it) => {
     }),
   );
 
-  it.effect("streams every room first, then only the rooms that change", () =>
+  it.effect("streams every room first, then again after each change", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const store = yield* PairRoomStore.make;
         yield* store.dispatch(createRoom);
-        const received = yield* Queue.unbounded<PairRoomsStreamItem>();
+        const received = yield* Queue.unbounded<PairRoomListEvent>();
         yield* store.streamRooms.pipe(
           Stream.runForEach((item) => Queue.offer(received, item)),
           Effect.forkScoped,
@@ -93,17 +93,14 @@ it.layer(SqlitePersistenceMemory)("PairRoomStore", (it) => {
           at: AT,
         });
         const update = yield* Queue.take(received);
-        assert.strictEqual(initial?.replace, true);
         assert.deepEqual(
-          initial?.rooms.map((room) => room.status),
+          initial.map((room) => room.status),
           ["active"],
         );
-        assert.strictEqual(update?.replace, false);
         assert.deepEqual(
-          update?.rooms.map((room) => room.statusReason),
+          update.map((room) => room.statusReason),
           ["Waiting on the user"],
         );
-        assert.isTrue((update?.sequence ?? 0) > (initial?.sequence ?? 0));
 
         const sql = yield* SqlClient.SqlClient;
         yield* sql`DELETE FROM pair_rooms`;

@@ -2,7 +2,6 @@ import * as Schema from "effect/Schema";
 
 import {
   IsoDateTime,
-  NonNegativeInt,
   PositiveInt,
   ProjectId,
   ThreadId,
@@ -317,14 +316,6 @@ export class PairRoomCommandError extends Schema.TaggedError<PairRoomCommandErro
 export const PairRoomsSubscribeInput = Schema.Struct({});
 export type PairRoomsSubscribeInput = typeof PairRoomsSubscribeInput.Type;
 
-/**
- * The first item carries every room with `replace: true`; later items carry
- * only rooms that changed.
- */
-export const PairRoomsStreamItem = Schema.Struct({
-  replace: Schema.Boolean,
-  rooms: Schema.Array(PairRoom),
-  removedRoomIds: Schema.Array(PairRoomId),
-  sequence: NonNegativeInt,
-});
-export type PairRoomsStreamItem = typeof PairRoomsStreamItem.Type;
+/** Every room on the environment. Sent first, then after every change. */
+export const PairRoomListEvent = Schema.Array(PairRoom);
+export type PairRoomListEvent = typeof PairRoomListEvent.Type;
