@@ -59,5 +59,7 @@ export function pairRoomNoteTitle(note: PairRoomNote): string {
       return `Your message, sent to ${to} too`;
     case "peer-answer":
       return `${from}'s answer, brought back to ${to}`;
+    case "decision":
+      return `Your decision, sent to ${to}`;
   }
 }

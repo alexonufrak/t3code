@@ -30,6 +30,8 @@ const ack = {
   detail: "Submitted.",
   assignment: null,
   decision: null,
+  handle: null,
+  retryAfterSeconds: null,
 } as const;
 
 const makeHarness = Effect.gen(function* () {

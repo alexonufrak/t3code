@@ -55,7 +55,7 @@ const PairConsultTool = Tool.make("pair_consult", {
   .annotate(Tool.OpenWorld, false);
 
 const PairWaitTool = Tool.make("pair_wait", {
-  description: `Pair Room, Lead only: wait up to waitSeconds (max ${PAIR_MAX_WAIT_SECONDS}) for a consult or assignment handle. Consults return the Peer's answer when done; assignments return once they are submitted, blocked or otherwise no longer running. Call again while the status is "pending".`,
+  description: `Pair Room: wait up to waitSeconds (max ${PAIR_MAX_WAIT_SECONDS}) for a handle. Consult and assignment handles are the Lead's; a decision handle belongs to whoever recorded it. Consults return the Peer's answer when done, assignments return once they are no longer running, and decisions return the user's answer once they settle it. Call again while the status is "pending".`,
   parameters: PairWaitInput,
   success: PairHandleResult,
   failure: PairToolError,
@@ -124,8 +124,7 @@ const PairReviewTool = Tool.make("pair_review", {
   .annotate(Tool.OpenWorld, false);
 
 const PairRecordDecisionTool = Tool.make("pair_record_decision", {
-  description:
-    "Pair Room, Lead or Peer: record a decision or a disagreement with your position and evidence, or add your position to an existing one by decisionId. The Lead may settle routine and architecture calls; product, security, scope and destructive calls stay open for the user.",
+  description: `Pair Room, Lead or Peer: record a decision or a disagreement with your position and evidence, or add your position to an existing one by decisionId. The Lead may settle routine and architecture calls itself, and those return "recorded". Product, security, scope and destructive calls belong to the user: the tool waits up to waitSeconds (max ${PAIR_MAX_WAIT_SECONDS}) for their answer and returns "settled" with it, or "pending" with a handle for pair_wait. Tell the user what you recommend and why before you wait.`,
   parameters: PairRecordDecisionInput,
   success: PairAckResult,
   failure: PairToolError,

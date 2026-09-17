@@ -19,6 +19,7 @@ import { pairRoomNoteContext, readPairRoomNote } from "@t3tools/shared/pairRoomN
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -926,6 +927,100 @@ describe("PairCoordinator", () => {
           to: "astra",
           fromThreadId: LEAD,
         });
+      }),
+    ),
+  );
+
+  it.effect("holds a user's decision open until they answer, then hands the answer back", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        const roomId = yield* harness.createRoom();
+
+        const routine = yield* harness.coordinator.recordDecision(LEAD, {
+          category: "routine",
+          title: "Name the helper",
+          position: "Call it retryPolicy.",
+          resolution: "Called it retryPolicy.",
+          waitSeconds: 0,
+        });
+        expect(routine).toMatchObject({ status: "recorded", handle: null });
+
+        const pending = yield* harness.coordinator.recordDecision(LEAD, {
+          category: "security",
+          title: "Retry on 401",
+          position: "Retrying a 401 risks locking the account.",
+          leadRecommendation: "Refresh the token instead.",
+          waitSeconds: 0,
+        });
+        expect(pending).toMatchObject({ status: "pending", retryAfterSeconds: 0 });
+        expect(pending.detail).toContain("belongs to the user");
+        const handle = pending.handle!;
+
+        // The Lead is mid-turn, waiting on the call it just recorded.
+        const answered = yield* harness.coordinator
+          .wait(LEAD, { handle, waitSeconds: 30 })
+          .pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+        yield* harness.coordinator.dispatchUserCommand({
+          type: "decision.resolve",
+          roomId,
+          decisionId: handle,
+          resolution: "Refresh the token; never retry a 401.",
+        });
+        const result = yield* Fiber.join(answered);
+        expect(result).toMatchObject({
+          status: "answered",
+          answer: "Refresh the token; never retry a 401.",
+          decision: { resolvedBy: "user" },
+        });
+
+        // The waiting call took the answer, so no turn repeats it.
+        const leadTurns = (yield* harness.recorded("thread.turn.start")).filter(
+          (command) => command.threadId === LEAD,
+        );
+        expect(leadTurns).toEqual([]);
+        const room = Option.getOrThrow(yield* harness.store.get(roomId));
+        expect(room.decisions.at(-1)?.resolutionDeliveredAt).not.toBeNull();
+      }),
+    ),
+  );
+
+  it.effect("brings a decision the user answered late to the Lead as a turn", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        const roomId = yield* harness.createRoom();
+        const pending = yield* harness.coordinator.recordDecision(LEAD, {
+          category: "scope",
+          title: "Rewrite the retry module",
+          position: "It needs a rewrite to fix this properly.",
+          waitSeconds: 0,
+        });
+        // The Lead gave up waiting and its turn ended.
+        yield* harness.setShell(LEAD, leadTurnEnded("completed"));
+
+        yield* harness.coordinator.dispatchUserCommand({
+          type: "decision.resolve",
+          roomId,
+          decisionId: pending.handle!,
+          resolution: "Patch it now, rewrite next sprint.",
+        });
+
+        const turn = asTurnStart(
+          yield* harness.commandWhere(turnStartWhere((command) => command.threadId === LEAD)),
+        );
+        expect(turn.message.text).toContain("Patch it now, rewrite next sprint.");
+        expect(turn.message.text).toContain("Rewrite the retry module");
+        expect(readPairRoomNote(turn.message.context)).toEqual({
+          purpose: "decision",
+          from: "fable",
+          to: "fable",
+        });
+        const status = yield* harness.coordinator.status(LEAD);
+        expect(status.decisions).toMatchObject([
+          { resolution: "Patch it now, rewrite next sprint.", resolvedBy: "user" },
+        ]);
       }),
     ),
   );

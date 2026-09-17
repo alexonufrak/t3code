@@ -155,7 +155,8 @@ export const PairConsultInput = Schema.Struct({
 
 export const PairWaitInput = Schema.Struct({
   handle: TrimmedNonEmptyString.annotate({
-    description: "A consultId from pair_consult or an assignmentId from pair_assign.",
+    description:
+      "A consultId from pair_consult, an assignmentId from pair_assign, or a decisionId from pair_record_decision.",
   }),
   waitSeconds: Schema.optional(WaitSeconds),
 });
@@ -169,6 +170,7 @@ export const PairHandleResult = Schema.Struct({
   reason: Schema.NullOr(Schema.String),
   retryAfterSeconds: Schema.NullOr(Schema.Int),
   assignment: Schema.NullOr(PairAssignmentView),
+  decision: Schema.NullOr(PairDecisionView),
 });
 export type PairHandleResult = typeof PairHandleResult.Type;
 
@@ -248,13 +250,20 @@ export const PairRecordDecisionInput = Schema.Struct({
   resolution: Schema.optional(Text).annotate({
     description: "Lead only, for routine and architecture calls: how it was settled.",
   }),
+  waitSeconds: Schema.optional(WaitSeconds),
 });
 
 export const PairAckResult = Schema.Struct({
-  status: Schema.Literals(["recorded", "rejected"]),
+  /**
+   * "settled" is a decision the user answered while you waited; "pending" is
+   * one they have not, and its handle goes to pair_wait.
+   */
+  status: Schema.Literals(["recorded", "settled", "pending", "rejected"]),
   reason: Schema.NullOr(Schema.String),
   detail: Schema.String,
   assignment: Schema.NullOr(PairAssignmentView),
   decision: Schema.NullOr(PairDecisionView),
+  handle: Schema.NullOr(Schema.String),
+  retryAfterSeconds: Schema.NullOr(Schema.Int),
 });
 export type PairAckResult = typeof PairAckResult.Type;

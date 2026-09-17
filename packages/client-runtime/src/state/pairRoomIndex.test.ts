@@ -80,6 +80,7 @@ function decision(overrides: Partial<PairDecision>): PairDecision {
     consequenceOfDeferring: null,
     resolution: null,
     resolvedBy: null,
+    resolutionDeliveredAt: null,
     createdAt: AT,
     updatedAt: AT,
     ...overrides,

@@ -52,6 +52,7 @@ import {
   assignmentBrief,
   consultPrompt,
   handoffRequest,
+  decisionResolved,
   leadHandoff,
   peerAnswerPrompt,
   resumeRequest,
@@ -74,10 +75,14 @@ import { PairWorkspace, type PairWorkspaceError } from "./PairWorkspace.ts";
 import {
   clampPairText,
   pairConsultAnswerOwed,
+  pairDecisionAnswerOwed,
   pairRoundLimit,
   pairRoundsUsed,
   pairScopeDeviations,
 } from "./pairRoomDecider.ts";
+
+/** How many settled decisions pair_status carries alongside the open ones. */
+const PAIR_STATUS_SETTLED_DECISIONS = 5;
 
 /** A Peer answer brought back to the Lead is cut at this length; the Peer's thread keeps all of it. */
 const PAIR_PEER_ANSWER_MAX_LENGTH = 40_000;
@@ -175,6 +180,7 @@ export class PairCoordinator extends Context.Service<
         readonly leadRecommendation?: string | undefined;
         readonly consequenceOfDeferring?: string | undefined;
         readonly resolution?: string | undefined;
+        readonly waitSeconds?: number | undefined;
       },
     ) => ToolEffect<PairAckResult>;
   }
@@ -296,6 +302,7 @@ const emptyHandleResult = {
   reason: null,
   retryAfterSeconds: null,
   assignment: null,
+  decision: null,
 } satisfies Omit<PairHandleResult, "status">;
 
 const userCommandError = (error: PairFailure): PairRoomCommandError => {
@@ -816,6 +823,8 @@ export const make = Effect.gen(function* () {
     detail: error.detail,
     assignment: null,
     decision: null,
+    handle: null,
+    retryAfterSeconds: null,
   });
 
   const requireRole = <R extends PairCallerRole>(caller: Caller, roles: ReadonlyArray<R>) =>
@@ -870,8 +879,14 @@ export const make = Effect.gen(function* () {
             error: consult.error,
           })),
           assignments: room.assignments.map(pairAssignmentView),
+          // Open calls, plus the last few answers so a settled call can be
+          // re-read instead of asked again.
           decisions: room.decisions
-            .filter((decision) => decision.resolution === null)
+            .filter(
+              (decision, index) =>
+                decision.resolution === null ||
+                index >= room.decisions.length - PAIR_STATUS_SETTLED_DECISIONS,
+            )
             .map(pairDecisionView),
           assignment: caller.role === "assignee" ? pairAssignmentView(caller.assignment) : null,
           leadSwitch: room.leadSwitch
@@ -944,6 +959,17 @@ export const make = Effect.gen(function* () {
         }
         return result;
       }
+      if (callerRoom.decisions.some((entry) => entry.decisionId === handle)) {
+        const decision = yield* waitForDecision(callerRoom, handle, waitSeconds);
+        return {
+          ...emptyHandleResult,
+          status: decision.resolution === null ? "pending" : "answered",
+          handle,
+          answer: decision.resolution,
+          retryAfterSeconds: decision.resolution === null ? 0 : null,
+          decision: pairDecisionView(decision),
+        } satisfies PairHandleResult;
+      }
       if (callerRoom.assignments.some((entry) => entry.assignmentId === handle)) {
         const settled = yield* waitForRoom(
           callerRoom.roomId,
@@ -960,13 +986,21 @@ export const make = Effect.gen(function* () {
           assignment: pairAssignmentView(assignment),
         } satisfies PairHandleResult;
       }
-      return yield* rejected("not-found", `No consult or assignment has the handle ${handle}.`);
+      return yield* rejected(
+        "not-found",
+        `No consult, assignment or decision has the handle ${handle}.`,
+      );
     });
 
   const wait: PairCoordinator["Service"]["wait"] = (threadId, input) =>
     toolEdge<PairHandleResult>(
       Effect.gen(function* () {
-        const caller = yield* requireRole(yield* resolveCaller(threadId), ["lead"]);
+        const caller = yield* resolveCaller(threadId);
+        // Decisions are room-wide, so whoever recorded one may wait on it.
+        // Consults and assignments stay the Lead's to read.
+        if (!caller.room.decisions.some((entry) => entry.decisionId === input.handle)) {
+          yield* requireRole(caller, ["lead"]);
+        }
         return yield* waitHandle(caller.room, input.handle, input.waitSeconds);
       }),
       rejectedHandle,
@@ -1123,6 +1157,8 @@ export const make = Effect.gen(function* () {
             : "Progress recorded.",
           assignment: pairAssignmentView(next.assignment),
           decision: null,
+          handle: null,
+          retryAfterSeconds: null,
         } satisfies PairAckResult;
       }),
       ackRejected,
@@ -1188,6 +1224,8 @@ export const make = Effect.gen(function* () {
               : "Submitted. Stop here; the Lead reviews next.",
           assignment: pairAssignmentView(next.assignment),
           decision: null,
+          handle: null,
+          retryAfterSeconds: null,
         } satisfies PairAckResult;
       }),
       ackRejected,
@@ -1263,6 +1301,8 @@ export const make = Effect.gen(function* () {
                   : "Approved and completed.",
               assignment: pairAssignmentView(approved.assignment),
               decision: null,
+              handle: null,
+              retryAfterSeconds: null,
             } satisfies PairAckResult;
           }
           case "request-changes": {
@@ -1305,6 +1345,8 @@ export const make = Effect.gen(function* () {
               detail: "Sent back for changes. Wait for the resubmission with pair_wait.",
               assignment: pairAssignmentView(next.assignment),
               decision: null,
+              handle: null,
+              retryAfterSeconds: null,
             } satisfies PairAckResult;
           }
           case "reject": {
@@ -1332,6 +1374,8 @@ export const make = Effect.gen(function* () {
               detail: "Rejected. Nothing will be merged.",
               assignment: pairAssignmentView(next.assignment),
               decision: null,
+              handle: null,
+              retryAfterSeconds: null,
             } satisfies PairAckResult;
           }
         }
@@ -1340,6 +1384,56 @@ export const make = Effect.gen(function* () {
     );
 
   // ── Decisions ───────────────────────────────────────────────────────
+
+  const decisionSettled = (decisionId: string) => (room: PairRoom) =>
+    room.decisions.find((entry) => entry.decisionId === decisionId)?.resolution != null;
+
+  /**
+   * Waits for the user to settle `decisionId`, and marks their answer read
+   * once it is returned, so no turn repeats it.
+   */
+  const waitForDecision = (room: PairRoom, decisionId: string, waitSeconds: number | undefined) =>
+    Effect.gen(function* () {
+      const settled = yield* waitForRoom(room.roomId, decisionSettled(decisionId), waitSeconds);
+      const current = Option.getOrElse(settled, () => room);
+      const decision = current.decisions.find((entry) => entry.decisionId === decisionId);
+      if (!decision) {
+        return yield* rejected("not-found", `Decision ${decisionId} is too old to read back.`);
+      }
+      if (pairDecisionAnswerOwed(decision)) {
+        yield* apply({
+          type: "decision.resolution-delivered",
+          roomId: current.roomId,
+          decisionId,
+          at: yield* nowIso,
+        });
+      }
+      return decision;
+    });
+
+  const decisionAck = (decision: PairDecision) =>
+    Effect.succeed(
+      decision.resolution === null
+        ? ({
+            status: "pending",
+            reason: null,
+            detail:
+              "This call belongs to the user, who has not answered yet. Tell them what you recommend and why, then keep waiting with pair_wait and this handle. If you stop waiting, their answer reaches you in a later turn.",
+            assignment: null,
+            decision: pairDecisionView(decision),
+            handle: decision.decisionId,
+            retryAfterSeconds: 0,
+          } satisfies PairAckResult)
+        : ({
+            status: "settled",
+            reason: null,
+            detail: `The user decided: ${decision.resolution}`,
+            assignment: null,
+            decision: pairDecisionView(decision),
+            handle: decision.decisionId,
+            retryAfterSeconds: null,
+          } satisfies PairAckResult),
+    );
 
   const recordDecision: PairCoordinator["Service"]["recordDecision"] = (threadId, input) =>
     toolEdge<PairAckResult>(
@@ -1380,20 +1474,25 @@ export const make = Effect.gen(function* () {
             at,
           });
         }
-        const decision = room.decisions.find((entry) => entry.decisionId === decisionId)!;
-        const view = pairDecisionView(decision);
-        return {
-          status: "recorded",
-          reason: null,
-          detail:
-            view.waitingOn === "user"
-              ? "Recorded and left open: this call belongs to the user. Tell them what you recommend and why."
-              : view.resolution
-                ? `Recorded and resolved by the ${decision.resolvedBy}.`
-                : "Recorded.",
-          assignment: null,
-          decision: view,
-        } satisfies PairAckResult;
+        const recorded = room.decisions.find((entry) => entry.decisionId === decisionId)!;
+        if (pairDecisionView(recorded).waitingOn !== "user") {
+          const view = pairDecisionView(recorded);
+          return {
+            status: "recorded",
+            reason: null,
+            detail: view.resolution
+              ? `Recorded and resolved by the ${recorded.resolvedBy}.`
+              : "Recorded.",
+            assignment: null,
+            decision: view,
+            handle: null,
+            retryAfterSeconds: null,
+          } satisfies PairAckResult;
+        }
+        // The call is the user's, so the tool waits on them the way a consult
+        // waits on the Peer: the answer comes back inside this turn if they are
+        // quick, and through pair_wait or a later turn if they are not.
+        return yield* decisionAck(yield* waitForDecision(room, decisionId, input.waitSeconds));
       }),
       ackRejected,
     );
@@ -1665,6 +1764,7 @@ export const make = Effect.gen(function* () {
             resolvedBy: "user",
             at,
           });
+          yield* deliverDecision(room);
           return room.roomId;
         }
         case "lead.switch-start": {
@@ -1956,6 +2056,49 @@ export const make = Effect.gen(function* () {
       });
     });
 
+  /**
+   * Starts a Lead turn with a decision the user settled, when no tool call
+   * took the answer. The Lead owns the reply to the user, so the answer goes
+   * there even when the Peer recorded the decision.
+   */
+  const deliverDecision = (room: PairRoom) =>
+    Effect.gen(function* () {
+      const owed = room.decisions.find(pairDecisionAnswerOwed);
+      if (!owed?.resolution) return;
+      const markDelivered = Effect.gen(function* () {
+        yield* apply({
+          type: "decision.resolution-delivered",
+          roomId: room.roomId,
+          decisionId: owed.decisionId,
+          at: yield* nowIso,
+        });
+      });
+      const lead = pairRoomParticipant(room, "lead");
+      const shell = lead?.threadId
+        ? Option.getOrUndefined(yield* threadShell(lead.threadId))
+        : undefined;
+      if (!lead?.threadId || !shell || room.status !== "active" || room.leadSwitch) {
+        return yield* markDelivered;
+      }
+      // A running turn may still be waiting in pair_wait; it settles on its own,
+      // and an idle moment later delivers whatever no call picked up.
+      if (isRunningTurn(shell)) return;
+      yield* markDelivered;
+      yield* startTurn({
+        commandKey: `pair:${room.roomId}:decision:${owed.decisionId}`,
+        threadId: lead.threadId,
+        persona: lead.persona,
+        runtimeMode: shell.runtimeMode,
+        text: decisionResolved({
+          title: owed.title,
+          category: owed.category,
+          resolution: owed.resolution,
+        }),
+        note: { purpose: "decision", from: lead.persona, to: lead.persona },
+        createdAt: yield* nowIso,
+      });
+    });
+
   const reviewGuardrail = (
     room: PairRoom,
     event: Extract<OrchestrationEvent, { type: "thread.turn-diff-completed" }>,
@@ -2165,8 +2308,10 @@ export const make = Effect.gen(function* () {
       if (event.type === "thread.session-set" || event.type === "thread.turn-diff-completed") {
         const room = Option.getOrElse(yield* store.get(found.value.roomId), () => found.value);
         yield* flagUnsubmittedTurn(room, threadId);
-        yield* deliverPeerAnswer(
-          Option.getOrElse(yield* store.get(found.value.roomId), () => room),
+        const settled = Option.getOrElse(yield* store.get(found.value.roomId), () => room);
+        yield* deliverPeerAnswer(settled);
+        yield* deliverDecision(
+          Option.getOrElse(yield* store.get(found.value.roomId), () => settled),
         );
       }
     }).pipe(
@@ -2230,6 +2375,7 @@ export const make = Effect.gen(function* () {
         );
       }
       yield* deliverPeerAnswer(Option.getOrElse(yield* store.get(room.roomId), () => room));
+      yield* deliverDecision(Option.getOrElse(yield* store.get(room.roomId), () => room));
       for (const assignment of room.assignments) {
         if (assignment.state !== "running") continue;
         const current = Option.getOrElse(yield* store.get(room.roomId), () => room);

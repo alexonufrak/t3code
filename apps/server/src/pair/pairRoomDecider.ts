@@ -195,6 +195,13 @@ export type PairRoomCommand =
       readonly resolvedBy: "lead" | "user";
       readonly at: string;
     }
+  | {
+      /** The agent that asked has read what the user decided. */
+      readonly type: "decision.resolution-delivered";
+      readonly roomId: PairRoomId;
+      readonly decisionId: string;
+      readonly at: string;
+    }
   | { readonly type: "lead.switch-start"; readonly roomId: PairRoomId; readonly at: string }
   | {
       readonly type: "lead.switch-draft";
@@ -531,7 +538,7 @@ const trimSettledAssignments = (assignments: ReadonlyArray<PairAssignment>) =>
 const trimSettledDecisions = (decisions: ReadonlyArray<PairDecision>) =>
   keepNewestSettled(
     decisions,
-    (decision) => decision.resolution !== null,
+    (decision) => decision.resolution !== null && !pairDecisionAnswerOwed(decision),
     PAIR_ROOM_SETTLED_DECISIONS_KEPT,
   );
 
@@ -555,7 +562,8 @@ const leadResolution = (
   decision: PairDecision,
   actor: PairActor,
   resolution: string | null,
-): Pick<PairDecision, "resolution" | "resolvedBy"> => {
+  at: string,
+): Pick<PairDecision, "resolution" | "resolvedBy" | "resolutionDeliveredAt"> => {
   const text = clampNullable(resolution);
   if (
     text === null ||
@@ -563,10 +571,19 @@ const leadResolution = (
     !pairDecisionLeadMayResolve(decision.category) ||
     decision.resolvedBy === "user"
   ) {
-    return { resolution: decision.resolution, resolvedBy: decision.resolvedBy };
+    return {
+      resolution: decision.resolution,
+      resolvedBy: decision.resolvedBy,
+      resolutionDeliveredAt: decision.resolutionDeliveredAt,
+    };
   }
-  return { resolution: text, resolvedBy: "lead" };
+  // The Lead settling its own call has nothing to be told.
+  return { resolution: text, resolvedBy: "lead", resolutionDeliveredAt: at };
 };
+
+/** A decision the user settled that the agent which asked has not read yet. */
+export const pairDecisionAnswerOwed = (decision: PairDecision) =>
+  decision.resolution !== null && decision.resolutionDeliveredAt === null;
 
 export function decidePairRoom(
   rooms: ReadonlyMap<PairRoomId, PairRoom>,
@@ -897,13 +914,14 @@ export function decidePairRoom(
         consequenceOfDeferring: clampNullable(command.consequenceOfDeferring),
         resolution: null,
         resolvedBy: null,
+        resolutionDeliveredAt: null,
         createdAt: command.at,
         updatedAt: command.at,
       };
       const decision: PairDecision = {
         ...base,
         positions: upsertPosition(base, command.actor, command.position),
-        ...leadResolution(base, command.actor, command.resolution),
+        ...leadResolution(base, command.actor, command.resolution, command.at),
       };
       return accept({
         ...room,
@@ -925,7 +943,7 @@ export function decidePairRoom(
         decisions: replaceById(room.decisions, "decisionId", {
           ...decision,
           positions: upsertPosition(decision, command.actor, command.position),
-          ...leadResolution(decision, command.actor, command.resolution),
+          ...leadResolution(decision, command.actor, command.resolution, command.at),
           updatedAt: command.at,
         }),
       });
@@ -954,8 +972,28 @@ export function decidePairRoom(
           ...decision,
           resolution: clampPairText(command.resolution),
           resolvedBy: command.resolvedBy,
+          // A Lead settling its own call already knows; the user's answer has to reach it.
+          resolutionDeliveredAt: command.resolvedBy === "lead" ? command.at : null,
           updatedAt: command.at,
         }),
+      });
+    }
+
+    case "decision.resolution-delivered": {
+      const decision = room.decisions.find(
+        (candidate) => candidate.decisionId === command.decisionId,
+      );
+      if (!decision) return reject("not-found", `Decision ${command.decisionId} was not found.`);
+      if (!pairDecisionAnswerOwed(decision)) return accept(room);
+      return accept({
+        ...room,
+        ...touched,
+        decisions: trimSettledDecisions(
+          replaceById(room.decisions, "decisionId", {
+            ...decision,
+            resolutionDeliveredAt: command.at,
+          }),
+        ),
       });
     }
 

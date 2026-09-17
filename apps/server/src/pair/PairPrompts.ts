@@ -95,6 +95,21 @@ export function consultPrompt(input: {
   return lines.join("\n");
 }
 
+/** Brings the user's answer to a decision back to the Lead, when no tool call is waiting for it. */
+export function decisionResolved(input: {
+  readonly title: string;
+  readonly category: string;
+  readonly resolution: string;
+}): string {
+  return [
+    `Pair Room: the user settled the open ${input.category} decision "${input.title}".`,
+    "",
+    `Their answer: ${input.resolution}`,
+    "",
+    "Act on it and tell the user what you are doing. It is settled: do not ask again or reopen it.",
+  ].join("\n");
+}
+
 /** Brings the Peer's answer to a relayed user message back to the Lead. */
 export function peerAnswerPrompt(input: {
   readonly lead: PairPersona;

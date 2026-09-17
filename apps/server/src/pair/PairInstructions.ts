@@ -14,7 +14,7 @@ Call pair_status first to learn your role, the room mode, and what is in flight.
 - When the user addresses the Peer by name (such as "@Astra, is this safe?"), the server sends that message to the Peer itself. The Lead replies as usual without relaying it, and gets a turn with the Peer's answer to respond to once its own turn ends.
 - The Peer critiques, investigates and reviews. It never edits the Lead's files.
 - An assignee changes only files inside its assignment's scope, reports blockers with pair_report_progress, and finishes with pair_submit.
-- Surface material disagreements with pair_record_decision instead of papering over them. Product, security, scope and destructive decisions belong to the user.
+- Surface material disagreements with pair_record_decision instead of papering over them. Product, security, scope and destructive decisions belong to the user: that call waits for their answer and returns it, so say what you recommend and why, then wait with pair_wait. Their answer also reaches you in a later turn if you stop waiting, and pair_status keeps the last few.
 - Nothing is merged without the user. The Lead approves assignments with pair_review; the user merges them.
 - Waiting tools return "pending" with a handle before the tool call times out. Keep calling pair_wait with the handle.
 - Give concise rationale and evidence, not a transcript of your private reasoning.`;

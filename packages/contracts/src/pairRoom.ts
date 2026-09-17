@@ -97,6 +97,8 @@ export const PairRoomNotePurpose = Schema.Literals([
   "user-relay",
   /** The Peer's answer to a relayed user message, brought back to the Lead. */
   "peer-answer",
+  /** A decision the user settled, brought to the Lead. */
+  "decision",
 ]);
 export type PairRoomNotePurpose = typeof PairRoomNotePurpose.Type;
 
@@ -267,6 +269,10 @@ export const PairDecision = Schema.Struct({
   consequenceOfDeferring: Schema.NullOr(PairText),
   resolution: Schema.NullOr(PairText),
   resolvedBy: Schema.NullOr(Schema.Literals(["lead", "user"])),
+  /** When the Lead was told what the user decided; a Lead's own call counts as told. */
+  resolutionDeliveredAt: Schema.NullOr(IsoDateTime).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
