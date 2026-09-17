@@ -245,6 +245,7 @@ describe("decidePairRoom", () => {
         by: "server",
         assignmentId: "a1",
         state: "awaiting-user",
+        approvedCommit: "approved123",
         at: AT,
       }),
     ).toMatchObject({ reason: "scope-deviation" });
@@ -265,6 +266,7 @@ describe("decidePairRoom", () => {
         by: "server",
         assignmentId: "a1",
         state: "awaiting-user",
+        approvedCommit: "approved123",
         at: AT,
       }).assignments[0]?.state,
     ).toBe("awaiting-user");
@@ -280,6 +282,7 @@ describe("decidePairRoom", () => {
         by: "server",
         assignmentId: "a1",
         state,
+        approvedCommit: "approved123",
         at: AT,
       });
     }

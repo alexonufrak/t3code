@@ -145,6 +145,7 @@ export type PairRoomCommand =
       readonly changedFiles?: ReadonlyArray<string> | undefined;
       readonly deviations?: ReadonlyArray<string> | undefined;
       readonly scopeGlobs?: ReadonlyArray<string> | undefined;
+      readonly approvedCommit?: string | undefined;
       readonly integrationCommit?: string | undefined;
       readonly at: string;
     }
@@ -385,7 +386,15 @@ const ASSIGNMENT_TRANSITIONS: Readonly<
     "rejected",
     "cancelled",
   ]),
-  "awaiting-user": new Set(["awaiting-user", "running", "integrated", "rejected", "cancelled"]),
+  // Back to submitted when the branch moves after approval, so the Lead reviews it again.
+  "awaiting-user": new Set([
+    "awaiting-user",
+    "submitted",
+    "running",
+    "integrated",
+    "rejected",
+    "cancelled",
+  ]),
   interrupted: new Set(["running", "cancelled"]),
   failed: new Set(["running", "cancelled"]),
   cancelled: new Set(["running"]),
@@ -683,6 +692,7 @@ export function decidePairRoom(
         report: null,
         changedFiles: [],
         deviations: [],
+        approvedCommit: null,
         integrationCommit: null,
         createdAt: command.at,
         updatedAt: command.at,
@@ -738,6 +748,17 @@ export function decidePairRoom(
         (command.scopeGlobs
           ? pairScopeDeviations(changedFiles, scopeGlobs)
           : assignment.deviations);
+      // Approval covers one commit; any return to live work drops it.
+      const approvedCommit =
+        state === "running" || state === "blocked" || state === "submitted"
+          ? null
+          : (command.approvedCommit ?? assignment.approvedCommit);
+      if (state === "awaiting-user" && approvedCommit === null) {
+        return reject(
+          "invalid",
+          `Assignment "${assignment.title}" has no approved commit to merge.`,
+        );
+      }
       if ((state === "awaiting-user" || state === "completed") && deviations.length > 0) {
         return reject(
           "scope-deviation",
@@ -755,6 +776,7 @@ export function decidePairRoom(
           changedFiles: [...changedFiles],
           deviations: [...deviations],
           scopeGlobs: [...scopeGlobs],
+          approvedCommit,
           integrationCommit: command.integrationCommit ?? assignment.integrationCommit,
           updatedAt: command.at,
         }),

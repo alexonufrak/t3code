@@ -197,6 +197,10 @@ export const PairAssignment = Schema.Struct({
   changedFiles: Schema.Array(TrimmedNonEmptyString),
   /** Changed files outside `scopeGlobs`. Lead approval is refused while any remain. */
   deviations: Schema.Array(TrimmedNonEmptyString),
+  /** The commit the Lead approved. Merging takes exactly this commit, or nothing. */
+  approvedCommit: Schema.NullOr(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   integrationCommit: Schema.NullOr(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,

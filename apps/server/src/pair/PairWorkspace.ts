@@ -27,7 +27,9 @@ export interface PairAssignmentWorktreePlan {
 
 export type PairIntegrationResult =
   | { readonly status: "merged"; readonly commit: string }
-  | { readonly status: "conflict"; readonly detail: string };
+  | { readonly status: "conflict"; readonly detail: string }
+  /** The branch or worktree moved after approval; nothing was merged. */
+  | { readonly status: "changed"; readonly detail: string };
 
 /**
  * Git work for a pair room. The Peer never runs in the Lead's checkout: it
@@ -64,20 +66,33 @@ export class PairWorkspace extends Context.Service<
       readonly plan: PairAssignmentWorktreePlan;
       readonly baseCommit: string;
     }) => Effect.Effect<void, PairWorkspaceError>;
-    /** Files that differ from `baseCommit`: committed, uncommitted and untracked. */
+    /**
+     * Files that differ from `baseCommit`: committed, uncommitted and untracked.
+     * Renames list both sides, so moving a file out of scope is never hidden.
+     */
     readonly changedFiles: (input: {
       readonly worktreePath: string;
       readonly baseCommit: string;
     }) => Effect.Effect<ReadonlyArray<string>, PairWorkspaceError>;
     /**
-     * Commits leftover assignment changes on its branch, then merges the branch
-     * into the Lead's checkout with `--no-ff`. A conflict aborts the merge and
-     * leaves both sides as they were.
+     * Commits leftover assignment changes on its branch and returns the commit
+     * that approval covers. Fails if the worktree left its branch.
+     */
+    readonly sealAssignment: (input: {
+      readonly worktreePath: string;
+      readonly branch: string;
+      readonly message: string;
+    }) => Effect.Effect<string, PairWorkspaceError>;
+    /**
+     * Merges exactly the approved commit into the Lead's checkout with `--no-ff`,
+     * after checking the branch still points at it and the worktree is clean.
+     * A conflict aborts the merge and leaves both sides as they were.
      */
     readonly integrate: (input: {
       readonly leadCwd: string;
       readonly worktreePath: string;
       readonly branch: string;
+      readonly commit: string;
       readonly message: string;
     }) => Effect.Effect<PairIntegrationResult, PairWorkspaceError>;
   }
@@ -112,7 +127,17 @@ export const make = Effect.gen(function* () {
         operation: `PairWorkspace.${operation}`,
         command: "git",
         cwd,
-        args: ["-c", "core.quotepath=false", ...args],
+        // Agents can write inside their worktrees, so the server never runs repository
+        // hooks or an fsmonitor command on their behalf.
+        args: [
+          "-c",
+          "core.quotepath=false",
+          "-c",
+          "core.hooksPath=/dev/null",
+          "-c",
+          "core.fsmonitor=false",
+          ...args,
+        ],
         ...options,
       })
       .pipe(
@@ -151,6 +176,29 @@ export const make = Effect.gen(function* () {
           }),
         );
   };
+
+  /**
+   * Confirms git sees `worktreePath` itself as a worktree root. Without this, a
+   * worktree whose `.git` file was removed would send `reset --hard` and
+   * `clean` to whatever repository encloses it.
+   */
+  const assertWorktreeRoot = (operation: string, worktreePath: string) =>
+    Effect.gen(function* () {
+      const output = yield* git(operation, worktreePath, ["rev-parse", "--show-toplevel"], {
+        allowNonZeroExit: true,
+      });
+      const realPath = (value: string) =>
+        fileSystem.realPath(value).pipe(Effect.orElseSucceed(() => path.resolve(value)));
+      if (
+        output.exitCode !== 0 ||
+        (yield* realPath(output.stdout.trim())) !== (yield* realPath(worktreePath))
+      ) {
+        return yield* new PairWorkspaceError({
+          operation,
+          detail: `Refusing to modify ${worktreePath}: git does not see it as its own worktree.`,
+        });
+      }
+    });
 
   const worktreePathFor = (root: string, name: string) =>
     path.join(worktreesRoot, path.basename(root), name);
@@ -202,6 +250,7 @@ export const make = Effect.gen(function* () {
           timeoutMs: 120_000,
         });
       } else {
+        yield* assertWorktreeRoot(operation, worktreePath);
         yield* git(operation, worktreePath, ["reset", "--hard", snapshotCommit]);
         yield* git(operation, worktreePath, ["clean", "-fd"]);
       }
@@ -249,6 +298,7 @@ export const make = Effect.gen(function* () {
       const tracked = yield* git(operation, input.worktreePath, [
         "diff",
         "--name-only",
+        "--no-renames",
         "-z",
         input.baseCommit,
       ]);
@@ -261,24 +311,65 @@ export const make = Effect.gen(function* () {
       return [...new Set([...splitNul(tracked.stdout), ...splitNul(untracked.stdout)])].toSorted();
     });
 
-  const integrate = (input: {
-    readonly leadCwd: string;
+  const sealAssignment = (input: {
     readonly worktreePath: string;
     readonly branch: string;
     readonly message: string;
   }) =>
     Effect.gen(function* () {
-      const operation = "integrate";
+      const operation = "sealAssignment";
       const worktreePath = yield* assertRoomOwned(operation, input.worktreePath);
+      yield* assertWorktreeRoot(operation, worktreePath);
+      const head = yield* git(operation, worktreePath, ["symbolic-ref", "-q", "HEAD"], {
+        allowNonZeroExit: true,
+      });
+      if (head.stdout.trim() !== `refs/heads/${input.branch}`) {
+        return yield* new PairWorkspaceError({
+          operation,
+          detail: `The assignment worktree is no longer on ${input.branch}. Switch it back before approving.`,
+        });
+      }
       const status = yield* git(operation, worktreePath, ["status", "--porcelain"]);
       if (status.stdout.trim().length > 0) {
         yield* git(operation, worktreePath, ["add", "-A"]);
-        yield* git(operation, worktreePath, ["commit", "-m", input.message]);
+        yield* git(operation, worktreePath, ["commit", "--no-verify", "-m", input.message]);
       }
+      return (yield* git(operation, worktreePath, [
+        "rev-parse",
+        "--verify",
+        `refs/heads/${input.branch}^{commit}`,
+      ])).stdout.trim();
+    });
+
+  const integrate = (input: {
+    readonly leadCwd: string;
+    readonly worktreePath: string;
+    readonly branch: string;
+    readonly commit: string;
+    readonly message: string;
+  }) =>
+    Effect.gen(function* () {
+      const operation = "integrate";
+      const worktreePath = yield* assertRoomOwned(operation, input.worktreePath);
+      yield* assertWorktreeRoot(operation, worktreePath);
+      const branchHead = yield* git(
+        operation,
+        worktreePath,
+        ["rev-parse", "-q", "--verify", `refs/heads/${input.branch}^{commit}`],
+        { allowNonZeroExit: true },
+      );
+      const status = yield* git(operation, worktreePath, ["status", "--porcelain"]);
+      if (branchHead.stdout.trim() !== input.commit || status.stdout.trim().length > 0) {
+        return {
+          status: "changed",
+          detail: `${input.branch} changed after it was approved.`,
+        } satisfies PairIntegrationResult;
+      }
+      // Merge the approved commit by id: a branch name can be shadowed by a tag.
       const merge = yield* git(
         operation,
         input.leadCwd,
-        ["merge", "--no-ff", "--no-edit", "-m", input.message, input.branch],
+        ["merge", "--no-ff", "--no-edit", "--no-verify", "-m", input.message, input.commit],
         { allowNonZeroExit: true, timeoutMs: 120_000 },
       );
       if (merge.exitCode === 0) {
@@ -307,6 +398,7 @@ export const make = Effect.gen(function* () {
     planAssignmentWorktree,
     createAssignmentWorktree,
     changedFiles,
+    sealAssignment,
     integrate,
   });
 });

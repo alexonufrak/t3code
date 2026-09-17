@@ -182,6 +182,7 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
         }),
       createAssignmentWorktree: () => Effect.void,
       changedFiles: () => Ref.get(changedFiles),
+      sealAssignment: () => Effect.succeed("approved1234567890"),
       integrate: () => Ref.get(integration),
     }),
     Layer.succeed(Crypto.Crypto, testCrypto),

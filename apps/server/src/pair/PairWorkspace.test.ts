@@ -138,10 +138,16 @@ it.layer(TestLayer)("PairWorkspace", (it) => {
             yield* workspace.changedFiles({ worktreePath: first.worktreePath, baseCommit }),
           ).toEqual(["src/backoff.ts", "src/retry.ts"]);
 
+          const approved = yield* workspace.sealAssignment({
+            worktreePath: first.worktreePath,
+            branch: first.branch,
+            message: "Pair assignment: Tune retry policy",
+          });
           const merged = yield* workspace.integrate({
             leadCwd: repo,
             worktreePath: first.worktreePath,
             branch: first.branch,
+            commit: approved,
             message: "Pair assignment: Tune retry policy",
           });
           expect(merged.status).toBe("merged");
@@ -163,6 +169,11 @@ it.layer(TestLayer)("PairWorkspace", (it) => {
             leadCwd: repo,
             worktreePath: second.worktreePath,
             branch: second.branch,
+            commit: yield* workspace.sealAssignment({
+              worktreePath: second.worktreePath,
+              branch: second.branch,
+              message: "Pair assignment: Conflicting change",
+            }),
             message: "Pair assignment: Conflicting change",
           });
           expect(conflict.status).toBe("conflict");
@@ -178,9 +189,92 @@ it.layer(TestLayer)("PairWorkspace", (it) => {
         const workspace = yield* PairWorkspace.PairWorkspace;
         const repo = yield* initRepo;
         const error = yield* workspace
-          .integrate({ leadCwd: repo, worktreePath: repo, branch: "main", message: "nope" })
+          .integrate({
+            leadCwd: repo,
+            worktreePath: repo,
+            branch: "main",
+            commit: "HEAD",
+            message: "nope",
+          })
           .pipe(Effect.flip);
         expect(error.detail).toContain("not a pair room worktree");
+      }),
+    );
+
+    it.effect(
+      "merges only the approved commit, even when a tag shadows the branch or edits follow approval",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const workspace = yield* PairWorkspace.PairWorkspace;
+          const repo = yield* initRepo;
+          const baseCommit = yield* workspace.resolveCommit({ cwd: repo });
+          const plan = yield* workspace.planAssignmentWorktree({
+            leadCwd: repo,
+            assignmentId: "assignment-tag12345",
+            title: "Retry tests",
+          });
+          yield* workspace.createAssignmentWorktree({ plan, baseCommit });
+          yield* fileSystem.writeFileString(
+            NodePath.join(plan.worktreePath, "src/retry.test.ts"),
+            "export {};\n",
+          );
+          const approved = yield* workspace.sealAssignment({
+            worktreePath: plan.worktreePath,
+            branch: plan.branch,
+            message: "Pair assignment: Retry tests",
+          });
+
+          // A tag named like the branch, pointing at an out-of-scope commit.
+          yield* git(plan.worktreePath, ["checkout", "-q", "--detach"]);
+          yield* fileSystem.writeFileString(NodePath.join(plan.worktreePath, "evil.ts"), "x\n");
+          yield* git(plan.worktreePath, ["add", "evil.ts"]);
+          yield* git(plan.worktreePath, ["commit", "-q", "-m", "evil"]);
+          yield* git(plan.worktreePath, ["tag", plan.branch]);
+          yield* git(plan.worktreePath, ["checkout", "-q", plan.branch]);
+
+          const merged = yield* workspace.integrate({
+            leadCwd: repo,
+            worktreePath: plan.worktreePath,
+            branch: plan.branch,
+            commit: approved,
+            message: "Pair assignment: Retry tests",
+          });
+          expect(merged.status).toBe("merged");
+          expect(yield* fileSystem.exists(NodePath.join(repo, "src/retry.test.ts"))).toBe(true);
+          expect(yield* fileSystem.exists(NodePath.join(repo, "evil.ts"))).toBe(false);
+
+          yield* fileSystem.writeFileString(
+            NodePath.join(plan.worktreePath, "README.md"),
+            "edited after approval\n",
+          );
+          const changed = yield* workspace.integrate({
+            leadCwd: repo,
+            worktreePath: plan.worktreePath,
+            branch: plan.branch,
+            commit: approved,
+            message: "Pair assignment: Retry tests",
+          });
+          expect(changed.status).toBe("changed");
+        }),
+    );
+
+    it.effect("lists both sides of a rename so moving a file out of scope shows up", () =>
+      Effect.gen(function* () {
+        const workspace = yield* PairWorkspace.PairWorkspace;
+        const repo = yield* initRepo;
+        const baseCommit = yield* workspace.resolveCommit({ cwd: repo });
+        const plan = yield* workspace.planAssignmentWorktree({
+          leadCwd: repo,
+          assignmentId: "assignment-mv123456",
+          title: "Move retry",
+        });
+        yield* workspace.createAssignmentWorktree({ plan, baseCommit });
+        yield* git(plan.worktreePath, ["mv", "src/retry.ts", "docs-retry.ts"]);
+        yield* git(plan.worktreePath, ["commit", "-q", "-m", "move"]);
+        expect(
+          yield* workspace.changedFiles({ worktreePath: plan.worktreePath, baseCommit }),
+        ).toEqual(["docs-retry.ts", "src/retry.ts"]);
       }),
     );
   });

@@ -61,6 +61,7 @@ function assignment(overrides: Partial<PairAssignment>): PairAssignment {
     report: null,
     changedFiles: [],
     deviations: [],
+    approvedCommit: null,
     integrationCommit: null,
     createdAt: AT,
     updatedAt: AT,

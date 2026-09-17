@@ -1178,13 +1178,30 @@ export const make = Effect.gen(function* () {
                 `Only a submitted assignment can be approved; this one is ${assignment.state}.`,
               );
             }
+            const assignmentShell = yield* threadShell(assignment.threadId);
+            if (Option.isSome(assignmentShell) && isRunningTurn(assignmentShell.value)) {
+              return yield* rejected(
+                "conflict",
+                `${personaName(assignment.owner)} is still working in the assignment thread. Wait for its turn to end, then approve.`,
+              );
+            }
+            // Approval covers one commit: leftovers are committed now, and merging takes
+            // exactly that commit, so later edits in the worktree never ride along.
+            const approvedCommit =
+              assignment.expectedArtifact === "findings"
+                ? undefined
+                : yield* fromWorkspace(
+                    workspace.sealAssignment({
+                      worktreePath: assignment.worktreePath,
+                      branch: assignment.branch,
+                      message: `Pair assignment: ${assignment.title}`,
+                    }),
+                  );
             const changes = yield* refreshChanges(assignment);
-            const refreshed = yield* updateAssignment(caller.room, assignment, {
+            const approved = yield* updateAssignment(caller.room, assignment, {
               by: "agent",
               ...changes,
-            });
-            const approved = yield* updateAssignment(refreshed.room, refreshed.assignment, {
-              by: "agent",
+              ...(approvedCommit ? { approvedCommit } : {}),
               state: assignment.expectedArtifact === "findings" ? "completed" : "awaiting-user",
               note: input.notes,
             });
@@ -1471,12 +1488,21 @@ export const make = Effect.gen(function* () {
           if (Option.isSome(assignmentShell) && isRunningTurn(assignmentShell.value)) {
             return yield* rejected("conflict", "The assignment thread is still running.");
           }
-          const changes = yield* refreshChanges(assignment);
-          const checked = yield* updateAssignment(room, assignment, { by: "user", ...changes });
-          if (checked.assignment.deviations.length > 0) {
-            return yield* rejected(
-              "scope-deviation",
-              `Files outside the scope changed since approval: ${checked.assignment.deviations.join(", ")}.`,
+          const sendBackForReview = (detail: string) =>
+            Effect.gen(function* () {
+              yield* updateAssignment(room, assignment, {
+                by: "user",
+                state: "submitted",
+                note: `${detail} Nothing was merged; the Lead needs to review it again.`,
+              });
+              return yield* rejected(
+                "conflict",
+                `${detail} Nothing was merged. Ask ${personaName(lead.persona)} to review it again.`,
+              );
+            });
+          if (assignment.approvedCommit === null) {
+            return yield* sendBackForReview(
+              "This assignment was approved without a pinned commit.",
             );
           }
           const result = yield* fromWorkspace(
@@ -1484,12 +1510,16 @@ export const make = Effect.gen(function* () {
               leadCwd: lead.cwd,
               worktreePath: assignment.worktreePath,
               branch: assignment.branch,
+              commit: assignment.approvedCommit,
               message: `Pair assignment: ${assignment.title}`,
             }),
           );
+          if (result.status === "changed") {
+            return yield* sendBackForReview(result.detail);
+          }
           const card = assignmentCard(assignment);
           if (result.status === "conflict") {
-            yield* updateAssignment(checked.room, checked.assignment, {
+            yield* updateAssignment(room, assignment, {
               by: "user",
               note: `Merge conflict, nothing was merged:\n${result.detail}`,
             });
@@ -1498,7 +1528,7 @@ export const make = Effect.gen(function* () {
               `Merging ${assignment.branch} conflicts with your checkout, so nothing was merged. The worktree is untouched.`,
             );
           }
-          const merged = yield* updateAssignment(checked.room, checked.assignment, {
+          const merged = yield* updateAssignment(room, assignment, {
             by: "user",
             state: "integrated",
             integrationCommit: result.commit,
