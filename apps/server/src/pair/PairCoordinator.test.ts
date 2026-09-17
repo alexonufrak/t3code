@@ -935,9 +935,23 @@ describe("PairCoordinator", () => {
       Effect.gen(function* () {
         const harness = yield* makeHarness();
         yield* Ref.set(harness.repository, false);
-        const error = yield* Effect.flip(harness.createRoom("roundtable"));
-        expect(error).toMatchObject({ reason: "invalid" });
-        expect(error.detail).toContain("/repo is not one");
+
+        // The common path: the room is created with the first message, before
+        // the Lead's thread exists, so the project is all there is to check.
+        const draft = yield* Effect.flip(
+          harness.coordinator.dispatchUserCommand({
+            type: "room.create",
+            projectId: PROJECT_ID,
+            leadThreadId: ThreadId.make("draft-thread"),
+            leadPersona: "fable",
+            mode: "roundtable",
+          }),
+        );
+        expect(draft).toMatchObject({ reason: "invalid" });
+        expect(draft.detail).toContain("/repo is not one");
+
+        const existing = yield* Effect.flip(harness.createRoom("roundtable"));
+        expect(existing).toMatchObject({ reason: "invalid" });
         expect(yield* harness.store.list).toEqual([]);
       }),
     ),

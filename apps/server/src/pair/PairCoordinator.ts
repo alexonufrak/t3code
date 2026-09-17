@@ -23,6 +23,7 @@ import {
   type PairRoomDispatchResult,
   type PairRoomNote,
   type PairRoomUserCommand,
+  type ProjectId,
   type TurnId,
 } from "@t3tools/contracts";
 import {
@@ -346,16 +347,19 @@ export const make = Effect.gen(function* () {
   const threadShell = (threadId: ThreadId) =>
     snapshots.getThreadShellById(threadId).pipe(Effect.mapError(internal("read thread")));
 
-  /** Where a participant works: its own worktree, or the project the thread belongs to. */
-  const threadCwd = (shell: OrchestrationThreadShell) =>
+  const projectCwd = (projectId: ProjectId) =>
     Effect.gen(function* () {
       const project = yield* snapshots
-        .getProjectShellById(shell.projectId)
+        .getProjectShellById(projectId)
         .pipe(Effect.mapError(internal("read project")));
-      const cwd = shell.worktreePath ?? Option.getOrUndefined(project)?.workspaceRoot;
+      const cwd = Option.getOrUndefined(project)?.workspaceRoot;
       if (!cwd) return yield* rejected("not-found", "The Lead's project no longer exists.");
       return cwd;
     });
+
+  /** Where a participant works: its own worktree, or the project the thread belongs to. */
+  const threadCwd = (shell: OrchestrationThreadShell) =>
+    shell.worktreePath ? Effect.succeed(shell.worktreePath) : projectCwd(shell.projectId);
 
   const apply = (command: Parameters<typeof store.dispatch>[0]) =>
     store
@@ -1442,18 +1446,19 @@ export const make = Effect.gen(function* () {
           }
           // Without a repository the Peer has nowhere to work, which would only
           // surface as a failed consult in the middle of the Lead's first turn.
-          if (Option.isSome(shell)) {
-            yield* fromWorkspace(
-              workspace.assertRepository({ cwd: yield* threadCwd(shell.value) }),
-            ).pipe(
-              Effect.catch((error: PairRoomRejectedError) =>
-                rejected(
-                  "workspace",
-                  `${error.detail} Open the repository itself as the project, or run git init there, and start the room again.`,
-                ),
+          // A room created with the first message has no Lead thread yet, so
+          // this falls back to the project the room is being created in.
+          const cwd = Option.isSome(shell)
+            ? yield* threadCwd(shell.value)
+            : yield* projectCwd(command.projectId);
+          yield* fromWorkspace(workspace.assertRepository({ cwd })).pipe(
+            Effect.catch((error: PairRoomRejectedError) =>
+              rejected(
+                "workspace",
+                `${error.detail} Open the repository itself as the project, or run git init there, and start the room again.`,
               ),
-            );
-          }
+            ),
+          );
           const room = yield* apply({
             type: "room.create",
             roomId: PairRoomId.make(yield* uuid),
