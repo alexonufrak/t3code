@@ -863,6 +863,9 @@ export const make = Effect.gen(function* () {
             .filter((decision) => decision.resolution === null)
             .map(pairDecisionView),
           assignment: caller.role === "assignee" ? pairAssignmentView(caller.assignment) : null,
+          leadSwitch: room.leadSwitch
+            ? { to: personaName(room.leadSwitch.toPersona), phase: room.leadSwitch.phase }
+            : null,
         } satisfies PairStatusResult;
       }),
       (error) => {

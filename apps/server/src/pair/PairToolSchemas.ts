@@ -124,6 +124,13 @@ export const PairStatusResult = Schema.Struct({
   decisions: Schema.Array(PairDecisionView),
   /** Set when the caller is working an assignment. */
   assignment: Schema.NullOr(PairAssignmentView),
+  /** Set while the user switches the Lead; new consults and assignments wait until it ends. */
+  leadSwitch: Schema.NullOr(
+    Schema.Struct({
+      to: Schema.String,
+      phase: Schema.Literals(["drafting", "ready", "failed"]),
+    }),
+  ),
 });
 export type PairStatusResult = typeof PairStatusResult.Type;
 
