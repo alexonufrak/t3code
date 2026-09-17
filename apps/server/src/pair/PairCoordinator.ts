@@ -692,28 +692,6 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  const findConsult = (handle: string) =>
-    store.list.pipe(
-      Effect.map((rooms) => {
-        for (const room of rooms) {
-          const consult = room.consults.find((entry) => entry.consultId === handle);
-          if (consult) return { room, consult };
-        }
-        return undefined;
-      }),
-    );
-
-  const findAssignment = (handle: string) =>
-    store.list.pipe(
-      Effect.map((rooms) => {
-        for (const room of rooms) {
-          const assignment = room.assignments.find((entry) => entry.assignmentId === handle);
-          if (assignment) return { room, assignment };
-        }
-        return undefined;
-      }),
-    );
-
   /**
    * Waits for a room change that makes `ready` true, subscribing before the
    * first check so a change landing in between is not missed.
@@ -910,16 +888,16 @@ export const make = Effect.gen(function* () {
           question: input.question,
           focusPaths: input.focusPaths ?? [],
         });
-        return yield* waitHandle(consultId, input.waitSeconds);
+        return yield* waitHandle(recorded, consultId, input.waitSeconds);
       }),
       rejectedHandle,
     );
 
-  const waitHandle = (handle: string, waitSeconds: number | undefined) =>
+  /** Handles resolve only inside the Lead's own room, so no other thread reads a consult or its proposal. */
+  const waitHandle = (callerRoom: PairRoom, handle: string, waitSeconds: number | undefined) =>
     Effect.gen(function* () {
-      const foundConsult = yield* findConsult(handle);
-      if (foundConsult) {
-        const fresh = yield* expireStaleConsult(foundConsult.room);
+      if (callerRoom.consults.some((entry) => entry.consultId === handle)) {
+        const fresh = yield* expireStaleConsult(callerRoom);
         const settled = yield* waitForRoom(fresh.roomId, consultDone(handle), waitSeconds);
         const room = Option.getOrElse(settled, () => fresh);
         const consultNow = room.consults.find((entry) => entry.consultId === handle);
@@ -928,14 +906,13 @@ export const make = Effect.gen(function* () {
         }
         return yield* consultResult(room, consultNow);
       }
-      const foundAssignment = yield* findAssignment(handle);
-      if (foundAssignment) {
+      if (callerRoom.assignments.some((entry) => entry.assignmentId === handle)) {
         const settled = yield* waitForRoom(
-          foundAssignment.room.roomId,
+          callerRoom.roomId,
           assignmentSettled(handle),
           waitSeconds,
         );
-        const room = Option.getOrElse(settled, () => foundAssignment.room);
+        const room = Option.getOrElse(settled, () => callerRoom);
         const assignment = room.assignments.find((entry) => entry.assignmentId === handle)!;
         return {
           ...emptyHandleResult,
@@ -951,8 +928,8 @@ export const make = Effect.gen(function* () {
   const wait: PairCoordinator["Service"]["wait"] = (threadId, input) =>
     toolEdge<PairHandleResult>(
       Effect.gen(function* () {
-        yield* resolveCaller(threadId);
-        return yield* waitHandle(input.handle, input.waitSeconds);
+        const caller = yield* requireRole(yield* resolveCaller(threadId), ["lead"]);
+        return yield* waitHandle(caller.room, input.handle, input.waitSeconds);
       }),
       rejectedHandle,
     );
@@ -1027,6 +1004,7 @@ export const make = Effect.gen(function* () {
                 type: "assignment.update",
                 roomId: room.roomId,
                 assignmentId,
+                by: "server",
                 state: "failed",
                 note: `Could not start: ${detail}`,
                 at: yield* nowIso,
@@ -1086,6 +1064,7 @@ export const make = Effect.gen(function* () {
         const note =
           input.blocked && input.question ? `${input.note}\nNeeds: ${input.question}` : input.note;
         const next = yield* updateAssignment(caller.room, caller.assignment, {
+          by: "agent",
           state: input.blocked ? "blocked" : "running",
           note,
         });
@@ -1134,6 +1113,7 @@ export const make = Effect.gen(function* () {
         const caller = yield* requireRole(yield* resolveCaller(threadId), ["assignee"]);
         const changes = yield* refreshChanges(caller.assignment);
         const next = yield* updateAssignment(caller.room, caller.assignment, {
+          by: "agent",
           state: "submitted",
           note: input.summary,
           report: {
@@ -1199,8 +1179,12 @@ export const make = Effect.gen(function* () {
               );
             }
             const changes = yield* refreshChanges(assignment);
-            const refreshed = yield* updateAssignment(caller.room, assignment, changes);
+            const refreshed = yield* updateAssignment(caller.room, assignment, {
+              by: "agent",
+              ...changes,
+            });
             const approved = yield* updateAssignment(refreshed.room, refreshed.assignment, {
+              by: "agent",
               state: assignment.expectedArtifact === "findings" ? "completed" : "awaiting-user",
               note: input.notes,
             });
@@ -1234,6 +1218,7 @@ export const make = Effect.gen(function* () {
               );
             }
             const next = yield* updateAssignment(caller.room, assignment, {
+              by: "agent",
               state: "running",
               note: `Changes requested: ${input.notes}`,
             });
@@ -1269,6 +1254,7 @@ export const make = Effect.gen(function* () {
           }
           case "reject": {
             const next = yield* updateAssignment(caller.room, assignment, {
+              by: "agent",
               state: "rejected",
               note: `Rejected: ${input.notes}`,
             });
@@ -1391,6 +1377,9 @@ export const make = Effect.gen(function* () {
             }
           }
           const shell = yield* threadShell(command.leadThreadId);
+          if (Option.isSome(shell) && shell.value.projectId !== command.projectId) {
+            return yield* rejected("invalid", "The Lead thread belongs to a different project.");
+          }
           if (
             Option.isSome(shell) &&
             shell.value.modelSelection.model !== PAIR_PERSONAS[command.leadPersona].model
@@ -1483,7 +1472,7 @@ export const make = Effect.gen(function* () {
             return yield* rejected("conflict", "The assignment thread is still running.");
           }
           const changes = yield* refreshChanges(assignment);
-          const checked = yield* updateAssignment(room, assignment, changes);
+          const checked = yield* updateAssignment(room, assignment, { by: "user", ...changes });
           if (checked.assignment.deviations.length > 0) {
             return yield* rejected(
               "scope-deviation",
@@ -1501,6 +1490,7 @@ export const make = Effect.gen(function* () {
           const card = assignmentCard(assignment);
           if (result.status === "conflict") {
             yield* updateAssignment(checked.room, checked.assignment, {
+              by: "user",
               note: `Merge conflict, nothing was merged:\n${result.detail}`,
             });
             return yield* rejected(
@@ -1509,6 +1499,7 @@ export const make = Effect.gen(function* () {
             );
           }
           const merged = yield* updateAssignment(checked.room, checked.assignment, {
+            by: "user",
             state: "integrated",
             integrationCommit: result.commit,
             note: `Merged as ${result.commit.slice(0, 12)}.`,
@@ -1528,6 +1519,7 @@ export const make = Effect.gen(function* () {
           const room = yield* requireRoom(command.roomId);
           const assignment = yield* requireAssignment(room, command.assignmentId);
           const next = yield* updateAssignment(room, assignment, {
+            by: "user",
             state: "cancelled",
             note: "Cancelled by the user.",
           });
@@ -1551,6 +1543,7 @@ export const make = Effect.gen(function* () {
           const assignment = yield* requireAssignment(room, command.assignmentId);
           const lead = yield* leadContext(room);
           const next = yield* updateAssignment(room, assignment, {
+            by: "user",
             state: "running",
             note: "Resumed by the user.",
           });
@@ -1577,7 +1570,7 @@ export const make = Effect.gen(function* () {
         case "assignment.set-scope": {
           const room = yield* requireRoom(command.roomId);
           const assignment = yield* requireAssignment(room, command.assignmentId);
-          yield* updateAssignment(room, assignment, { scopeGlobs: command.scopeGlobs });
+          yield* updateAssignment(room, assignment, { by: "user", scopeGlobs: command.scopeGlobs });
           return room.roomId;
         }
         case "decision.resolve": {
@@ -1807,7 +1800,7 @@ export const make = Effect.gen(function* () {
         return;
       const changes = yield* refreshChanges(assignment);
       const before = new Set(assignment.deviations);
-      const next = yield* updateAssignment(room, assignment, changes);
+      const next = yield* updateAssignment(room, assignment, { by: "server", ...changes });
       const added = changes.deviations.filter((file) => !before.has(file));
       if (added.length > 0) {
         yield* mirror(next.room, {
@@ -1832,6 +1825,7 @@ export const make = Effect.gen(function* () {
       if (!turn || turn.state === "running" || !turn.completedAt) return;
       if (turn.completedAt < assignment.updatedAt) return;
       const next = yield* updateAssignment(room, assignment, {
+        by: "server",
         state: "blocked",
         note:
           turn.state === "completed"
@@ -1923,6 +1917,7 @@ export const make = Effect.gen(function* () {
       const assignment = room.assignments.find((entry) => entry.threadId === threadId);
       if (assignment && PAIR_ASSIGNMENT_ACTIVE_STATES.has(assignment.state)) {
         yield* updateAssignment(room, assignment, {
+          by: "server",
           state: "cancelled",
           note: "The assignment's thread was deleted.",
         });
@@ -2021,6 +2016,7 @@ export const make = Effect.gen(function* () {
         if (assignment.state !== "running") continue;
         const current = Option.getOrElse(yield* store.get(room.roomId), () => room);
         const next = yield* updateAssignment(current, assignment, {
+          by: "server",
           state: "interrupted",
           note: "The server restarted while this assignment was running. Resume or cancel it.",
         });

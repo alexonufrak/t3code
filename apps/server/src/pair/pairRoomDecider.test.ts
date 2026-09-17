@@ -217,6 +217,7 @@ describe("decidePairRoom", () => {
     apply(rooms, {
       type: "assignment.update",
       roomId: ROOM_ID,
+      by: "server",
       assignmentId: "a1",
       state: "cancelled",
       at: AT,
@@ -230,6 +231,7 @@ describe("decidePairRoom", () => {
     apply(rooms, {
       type: "assignment.update",
       roomId: ROOM_ID,
+      by: "server",
       assignmentId: "a1",
       state: "submitted",
       changedFiles: ["src/auth/token.ts", "package.json"],
@@ -240,6 +242,7 @@ describe("decidePairRoom", () => {
       rejectionOf(rooms, {
         type: "assignment.update",
         roomId: ROOM_ID,
+        by: "server",
         assignmentId: "a1",
         state: "awaiting-user",
         at: AT,
@@ -249,6 +252,7 @@ describe("decidePairRoom", () => {
     const widened = apply(rooms, {
       type: "assignment.update",
       roomId: ROOM_ID,
+      by: "server",
       assignmentId: "a1",
       scopeGlobs: ["src/auth/**", "package.json"],
       at: AT,
@@ -258,6 +262,7 @@ describe("decidePairRoom", () => {
       apply(rooms, {
         type: "assignment.update",
         roomId: ROOM_ID,
+        by: "server",
         assignmentId: "a1",
         state: "awaiting-user",
         at: AT,
@@ -272,6 +277,7 @@ describe("decidePairRoom", () => {
       apply(rooms, {
         type: "assignment.update",
         roomId: ROOM_ID,
+        by: "server",
         assignmentId: "a1",
         state,
         at: AT,
@@ -281,11 +287,35 @@ describe("decidePairRoom", () => {
       rejectionOf(rooms, {
         type: "assignment.update",
         roomId: ROOM_ID,
+        by: "server",
         assignmentId: "a1",
         state: "running",
         at: AT,
       }).reason,
     ).toBe("invalid");
+  });
+
+  it("keeps agents from reopening work the user stopped, or moving work in a paused room", () => {
+    const rooms = createRoom();
+    apply(rooms, assign("a1", ["src/**"]));
+    const update = (
+      by: "agent" | "user",
+      state: "running" | "cancelled" | "submitted",
+    ): PairRoomCommand => ({
+      type: "assignment.update",
+      roomId: ROOM_ID,
+      assignmentId: "a1",
+      by,
+      state,
+      at: AT,
+    });
+    apply(rooms, update("user", "cancelled"));
+    expect(rejectionOf(rooms, update("agent", "running")).reason).toBe("invalid");
+    apply(rooms, update("user", "running"));
+
+    apply(rooms, { type: "room.update", roomId: ROOM_ID, status: "paused", at: AT });
+    expect(rejectionOf(rooms, update("agent", "submitted")).reason).toBe("room-paused");
+    expect(apply(rooms, update("user", "cancelled")).assignments[0]?.state).toBe("cancelled");
   });
 
   it("lets the Lead settle routine calls but leaves product calls open for the user", () => {

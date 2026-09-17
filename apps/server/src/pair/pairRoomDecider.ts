@@ -137,6 +137,8 @@ export type PairRoomCommand =
       readonly type: "assignment.update";
       readonly roomId: PairRoomId;
       readonly assignmentId: string;
+      /** Agents are held to live work in an active room; the user and the server are not. */
+      readonly by: PairAssignmentUpdater;
       readonly state?: PairAssignmentState | undefined;
       readonly note?: string | null | undefined;
       readonly report?: PairAssignmentReport | undefined;
@@ -192,6 +194,9 @@ export type PairRoomCommand =
       readonly at: string;
     }
   | { readonly type: "lead.switch-cancel"; readonly roomId: PairRoomId; readonly at: string };
+
+/** Who asked for an assignment change: a pair tool call, a user command, or the server itself. */
+export type PairAssignmentUpdater = "agent" | "user" | "server";
 
 export type PairDecideResult =
   | { readonly ok: true; readonly room: PairRoom }
@@ -411,7 +416,8 @@ export const findPairRoomByThread = (
   return undefined;
 };
 
-const requireWritable = (room: PairRoom): PairRejection | null => {
+/** Agents act only in an active room: a pause or close from the user stops every pair tool that changes state. */
+const requireActive = (room: PairRoom): PairRejection | null => {
   if (room.status === "closed") {
     return { reason: "room-closed", detail: "This pair room is closed." };
   }
@@ -423,6 +429,19 @@ const requireWritable = (room: PairRoom): PairRejection | null => {
         : "This pair room is paused until the user resumes it.",
     };
   }
+  return null;
+};
+
+/** Assignment states an agent may still move. Cancelled, failed and interrupted work reopens only by the user. */
+const AGENT_MOVABLE_ASSIGNMENT_STATES: ReadonlySet<PairAssignmentState> = new Set([
+  "running",
+  "blocked",
+  "submitted",
+]);
+
+const requireWritable = (room: PairRoom): PairRejection | null => {
+  const inactive = requireActive(room);
+  if (inactive) return inactive;
   if (room.leadSwitch !== null && room.leadSwitch.phase !== "failed") {
     return {
       reason: "lead-switching",
@@ -678,6 +697,16 @@ export function decidePairRoom(
       if (!assignment) {
         return reject("not-found", `Assignment ${command.assignmentId} was not found.`);
       }
+      if (command.by === "agent") {
+        const inactive = requireActive(room);
+        if (inactive) return { ok: false, rejection: inactive };
+        if (!AGENT_MOVABLE_ASSIGNMENT_STATES.has(assignment.state)) {
+          return reject(
+            "invalid",
+            `Assignment "${assignment.title}" is ${assignment.state}. Only the user can reopen it.`,
+          );
+        }
+      }
       const state = command.state ?? assignment.state;
       if (!ASSIGNMENT_TRANSITIONS[assignment.state].has(state)) {
         return reject(
@@ -733,7 +762,8 @@ export function decidePairRoom(
     }
 
     case "decision.record": {
-      if (room.status === "closed") return reject("room-closed", "This pair room is closed.");
+      const inactive = requireActive(room);
+      if (inactive) return { ok: false, rejection: inactive };
       if (room.decisions.some((existing) => existing.decisionId === command.decisionId)) {
         return reject("conflict", `Decision ${command.decisionId} already exists.`);
       }
@@ -759,7 +789,8 @@ export function decidePairRoom(
     }
 
     case "decision.add-position": {
-      if (room.status === "closed") return reject("room-closed", "This pair room is closed.");
+      const inactive = requireActive(room);
+      if (inactive) return { ok: false, rejection: inactive };
       const decision = room.decisions.find(
         (candidate) => candidate.decisionId === command.decisionId,
       );

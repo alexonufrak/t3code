@@ -342,6 +342,12 @@ describe("PairCoordinator", () => {
           },
         });
 
+        const peerWait = yield* harness.coordinator.wait(peerThreadId, {
+          handle: pending.handle!,
+          waitSeconds: 0,
+        });
+        expect(peerWait).toMatchObject({ status: "rejected" });
+
         yield* harness.finishTurn({
           threadId: peerThreadId,
           state: "completed",

@@ -55,7 +55,7 @@ const PairConsultTool = Tool.make("pair_consult", {
   .annotate(Tool.OpenWorld, false);
 
 const PairWaitTool = Tool.make("pair_wait", {
-  description: `Pair Room: wait up to waitSeconds (max ${PAIR_MAX_WAIT_SECONDS}) for a consult or assignment handle. Consults return the Peer's answer when done; assignments return once they are submitted, blocked or otherwise no longer running. Call again while the status is "pending".`,
+  description: `Pair Room, Lead only: wait up to waitSeconds (max ${PAIR_MAX_WAIT_SECONDS}) for a consult or assignment handle. Consults return the Peer's answer when done; assignments return once they are submitted, blocked or otherwise no longer running. Call again while the status is "pending".`,
   parameters: PairWaitInput,
   success: PairHandleResult,
   failure: PairToolError,
