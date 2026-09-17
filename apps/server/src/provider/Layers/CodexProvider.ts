@@ -529,7 +529,18 @@ const makePendingCodexProvider = (
     });
   });
 
-function accountProbeStatus(account: CodexAppServerProviderSnapshot["account"]): {
+const quotePath = Schema.encodeSync(Schema.fromJsonString(Schema.String));
+
+/** Names the home to sign in to, so a login lands where this provider reads it. */
+const codexSignedOutMessage = (homePath: string) =>
+  homePath
+    ? `Codex CLI is not authenticated. Run \`codex login\` with CODEX_HOME set to ${quotePath(homePath)} and try again.`
+    : "Codex CLI is not authenticated. Run `codex login` and try again.";
+
+function accountProbeStatus(
+  account: CodexAppServerProviderSnapshot["account"],
+  homePath: string,
+): {
   readonly status: Exclude<ServerProviderState, "disabled">;
   readonly auth: ServerProvider["auth"];
   readonly message?: string;
@@ -551,7 +562,7 @@ function accountProbeStatus(account: CodexAppServerProviderSnapshot["account"]):
     return {
       status: "error",
       auth: { status: "unauthenticated" },
-      message: "Codex CLI is not authenticated. Run `codex login` and try again.",
+      message: codexSignedOutMessage(homePath),
     };
   }
 
@@ -654,7 +665,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   }
 
   const snapshot = probeResult.success.value;
-  const accountStatus = accountProbeStatus(snapshot.account);
+  const accountStatus = accountProbeStatus(snapshot.account, codexSettings.homePath);
   const usageLimits =
     snapshot.account.account?.type === "apiKey"
       ? makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" })

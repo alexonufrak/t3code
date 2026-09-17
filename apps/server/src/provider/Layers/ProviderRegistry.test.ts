@@ -453,6 +453,25 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         }),
       );
 
+      it.effect("names the configured Codex home when signed out", () =>
+        Effect.gen(function* () {
+          const status = yield* checkCodexProviderStatus(
+            decodeCodexSettings({ homePath: "/Users/alice/.t3-pair/codex" }),
+            () =>
+              Effect.succeed(
+                makeCodexProbeSnapshot({
+                  account: { account: null, requiresOpenaiAuth: true },
+                }),
+              ),
+          );
+
+          assert.strictEqual(
+            status.message,
+            'Codex CLI is not authenticated. Run `codex login` with CODEX_HOME set to "/Users/alice/.t3-pair/codex" and try again.',
+          );
+        }),
+      );
+
       it.effect(
         "returns ready with unknown auth when app-server does not require OpenAI auth",
         () =>

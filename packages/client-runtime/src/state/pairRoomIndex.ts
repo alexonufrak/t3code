@@ -48,7 +48,8 @@ function personaAvailability(
   if (!provider.enabled) return unavailable(`Enable ${label} in Settings.`);
   if (!provider.installed) return unavailable(`Install ${label} on this environment.`);
   if (provider.auth.status === "unauthenticated") {
-    return unavailable(`Sign in to ${label} on this environment.`);
+    // The provider's own message names the exact login step, including a custom home.
+    return unavailable(provider.message ?? `Sign in to ${label} on this environment.`);
   }
   const hasModel = provider.models.some(
     (model) => model.slug === profile.model || model.aliases?.includes(profile.model),
