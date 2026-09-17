@@ -21,7 +21,16 @@ export interface PairMirrorCard {
 
 export type PairMirrorOutcome =
   | { readonly status: "answered"; readonly answer: string }
-  | { readonly status: "failed"; readonly error: string };
+  | { readonly status: "failed"; readonly error: string }
+  | { readonly status: "stopped"; readonly reason: string };
+
+/** Card text rides the Lead's activity stream to every client, so it stays short. */
+export const PAIR_MIRROR_SUMMARY_MAX_LENGTH = 2000;
+
+const clampSummary = (value: string) =>
+  value.length <= PAIR_MIRROR_SUMMARY_MAX_LENGTH
+    ? value
+    : `${value.slice(0, PAIR_MIRROR_SUMMARY_MAX_LENGTH - 3)}...`;
 
 function cardFields(card: PairMirrorCard) {
   return {
@@ -35,11 +44,40 @@ function cardFields(card: PairMirrorCard) {
 }
 
 export function pairMirrorStartedPayload(card: PairMirrorCard, detail: string) {
-  return { ...cardFields(card), status: "running", detail } as const;
+  return { ...cardFields(card), status: "running", detail: clampSummary(detail) } as const;
+}
+
+/** `running` after a terminal state reopens the card, which is how a revision round shows. */
+export function pairMirrorProgressPayload(
+  card: PairMirrorCard,
+  update: { readonly status: "running" | "waiting"; readonly summary: string },
+) {
+  return {
+    ...cardFields(card),
+    status: update.status,
+    summary: clampSummary(update.summary),
+  } as const;
 }
 
 export function pairMirrorCompletedPayload(card: PairMirrorCard, outcome: PairMirrorOutcome) {
-  return outcome.status === "answered"
-    ? ({ ...cardFields(card), status: "completed", summary: outcome.answer } as const)
-    : ({ ...cardFields(card), status: "failed", summary: outcome.error } as const);
+  switch (outcome.status) {
+    case "answered":
+      return {
+        ...cardFields(card),
+        status: "completed",
+        summary: clampSummary(outcome.answer),
+      } as const;
+    case "failed":
+      return {
+        ...cardFields(card),
+        status: "failed",
+        summary: clampSummary(outcome.error),
+      } as const;
+    case "stopped":
+      return {
+        ...cardFields(card),
+        status: "stopped",
+        summary: clampSummary(outcome.reason),
+      } as const;
+  }
 }

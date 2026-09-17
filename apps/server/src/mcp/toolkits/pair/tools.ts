@@ -1,150 +1,149 @@
-import { McpCapabilityUnavailableError, TrimmedNonEmptyString } from "@t3tools/contracts";
+import { McpCapabilityUnavailableError } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import * as Tool from "effect/unstable/ai/Tool";
 import * as Toolkit from "effect/unstable/ai/Toolkit";
 
+import { PairCoordinator, PairToolUnavailableError } from "../../../pair/PairCoordinator.ts";
+import {
+  PAIR_MAX_WAIT_SECONDS,
+  PairAckResult,
+  PairAssignInput,
+  PairAssignResult,
+  PairConsultInput,
+  PairHandleResult,
+  PairRecordDecisionInput,
+  PairReportProgressInput,
+  PairReviewInput,
+  PairStatusResult,
+  PairSubmitInput,
+  PairWaitInput,
+} from "../../../pair/PairToolSchemas.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
-import * as OrchestrationEngine from "../../../orchestration/Services/OrchestrationEngine.ts";
-import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 
-/**
- * Phase 0 feasibility tools for Pair Room. They prove the seams the real
- * `pair_*` toolkit depends on (caller identity, server-created peer threads,
- * bounded waits with continuation handles, mirrored subagent cards) and are
- * replaced by the room-aware toolkit in Phase 1.
- */
-
-const dependencies = [
-  McpInvocationContext.McpInvocationContext,
-  OrchestrationEngine.OrchestrationEngineService,
-  ProjectionSnapshotQuery.ProjectionSnapshotQuery,
-];
-
-/** Both CLIs cut a single MCP call off near 60s, so waits stay well under it. */
-export const PAIR_MAX_WAIT_SECONDS = 45;
-
-export class PairThreadNotFoundError extends Schema.TaggedError<PairThreadNotFoundError>()(
-  "PairThreadNotFoundError",
-  { threadId: Schema.String },
-) {
-  override get message(): string {
-    return `Thread ${this.threadId} was not found.`;
-  }
-}
-
-export class PairConsultNotFoundError extends Schema.TaggedError<PairConsultNotFoundError>()(
-  "PairConsultNotFoundError",
-  { consultId: Schema.String },
-) {
-  override get message(): string {
-    return `Consult ${this.consultId} is unknown or was lost when the server restarted.`;
-  }
-}
-
-export class PairDispatchFailedError extends Schema.TaggedError<PairDispatchFailedError>()(
-  "PairDispatchFailedError",
-  { cause: Schema.Defect() },
-) {
-  override get message(): string {
-    return "Could not reach the peer participant.";
-  }
-}
+const dependencies = [McpInvocationContext.McpInvocationContext, PairCoordinator];
 
 export const PairToolError = Schema.Union([
   McpCapabilityUnavailableError,
-  PairThreadNotFoundError,
-  PairConsultNotFoundError,
-  PairDispatchFailedError,
+  PairToolUnavailableError,
 ]);
 export type PairToolError = typeof PairToolError.Type;
 
-const WaitSeconds = Schema.Int.check(
-  Schema.isBetween({ minimum: 0, maximum: PAIR_MAX_WAIT_SECONDS }),
-).annotate({
-  description: `Seconds to wait for the peer before returning a pending handle (0-${PAIR_MAX_WAIT_SECONDS}).`,
-});
-
-export const PairPingInput = Schema.Struct({
-  sleepSeconds: Schema.optional(
-    Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 120 })).annotate({
-      description:
-        "Hold the call open this long before answering. Used to probe CLI tool timeouts.",
-    }),
-  ),
-});
-
-export const PairPingResult = Schema.Struct({
-  threadId: Schema.String,
-  providerInstanceId: Schema.String,
-  capabilities: Schema.Array(Schema.String),
-  sleptSeconds: Schema.Int,
-});
-export type PairPingResult = typeof PairPingResult.Type;
-
-export const PairConsultInput = Schema.Struct({
-  question: TrimmedNonEmptyString.annotate({
-    description:
-      "What you want the peer to critique, investigate, or answer. Include the context it needs; it cannot see your conversation.",
-  }),
-  waitSeconds: Schema.optional(WaitSeconds),
-});
-
-export const PairWaitInput = Schema.Struct({
-  consultId: TrimmedNonEmptyString.annotate({
-    description: "The consultId returned by pair_spike_consult.",
-  }),
-  waitSeconds: Schema.optional(WaitSeconds),
-});
-
-export const PairConsultResult = Schema.Struct({
-  status: Schema.Literals(["answered", "pending", "failed"]),
-  consultId: Schema.String,
-  peerThreadId: Schema.String,
-  peerModel: Schema.String,
-  answer: Schema.NullOr(Schema.String),
-  error: Schema.NullOr(Schema.String),
-  retryAfterSeconds: Schema.NullOr(Schema.Int),
-});
-export type PairConsultResult = typeof PairConsultResult.Type;
-
-const PairPingTool = Tool.make("pair_ping", {
+const PairStatusTool = Tool.make("pair_status", {
   description:
-    "Pair Room feasibility probe. Reports which thread and provider instance the server sees for this call, optionally after holding the call open.",
-  parameters: PairPingInput,
-  success: PairPingResult,
+    "Pair Room: your role (Lead, Peer or assignee), the other participant, the room mode and guidance, consult rounds used, assignments and open decisions. Call it first in a pair room and whenever you resume.",
+  success: PairStatusResult,
   failure: PairToolError,
   dependencies,
 })
-  .annotate(Tool.Title, "Pair ping")
+  .annotate(Tool.Title, "Pair room status")
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true)
   .annotate(Tool.OpenWorld, false);
 
-const PairSpikeConsultTool = Tool.make("pair_spike_consult", {
-  description: `Ask the other Pair Room participant (Fable if you are Astra, Astra if you are Fable) a question in its own thread. Waits up to waitSeconds (max ${PAIR_MAX_WAIT_SECONDS}); if the peer is still working, returns status "pending" and you call pair_spike_wait with the consultId.`,
+const PairConsultTool = Tool.make("pair_consult", {
+  description: `Pair Room, Lead only: ask the Peer for a critique, review, answer or independent roundtable proposal. The Peer works on a snapshot of your checkout, including uncommitted files, and cannot see your conversation. Waits up to waitSeconds (max ${PAIR_MAX_WAIT_SECONDS}); if the Peer is still working the result is status "pending" and you continue with pair_wait. A "rejected" result explains why (round limit, Peer busy, room paused).`,
   parameters: PairConsultInput,
-  success: PairConsultResult,
+  success: PairHandleResult,
   failure: PairToolError,
   dependencies,
 })
-  .annotate(Tool.Title, "Consult pair peer")
+  .annotate(Tool.Title, "Consult the Peer")
   .annotate(Tool.Readonly, false)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, false)
   .annotate(Tool.OpenWorld, false);
 
-const PairSpikeWaitTool = Tool.make("pair_spike_wait", {
-  description: `Wait up to waitSeconds (max ${PAIR_MAX_WAIT_SECONDS}) for a pending pair_spike_consult to finish. Call again while the status stays "pending".`,
+const PairWaitTool = Tool.make("pair_wait", {
+  description: `Pair Room: wait up to waitSeconds (max ${PAIR_MAX_WAIT_SECONDS}) for a consult or assignment handle. Consults return the Peer's answer when done; assignments return once they are submitted, blocked or otherwise no longer running. Call again while the status is "pending".`,
   parameters: PairWaitInput,
-  success: PairConsultResult,
+  success: PairHandleResult,
   failure: PairToolError,
   dependencies,
 })
-  .annotate(Tool.Title, "Wait for pair peer")
+  .annotate(Tool.Title, "Wait for pair work")
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true)
   .annotate(Tool.OpenWorld, false);
 
-export const PairSpikeToolkit = Toolkit.make(PairPingTool, PairSpikeConsultTool, PairSpikeWaitTool);
+const PairAssignTool = Tool.make("pair_assign", {
+  description:
+    "Pair Room, Lead only: delegate bounded work to the Peer in its own git worktree and branch. Give a self-contained brief, the globs it may change, and acceptance criteria. Returns an assignmentId to pass to pair_wait. Nothing is merged until you approve with pair_review and the user merges.",
+  parameters: PairAssignInput,
+  success: PairAssignResult,
+  failure: PairToolError,
+  dependencies,
+})
+  .annotate(Tool.Title, "Assign work to the Peer")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, false)
+  .annotate(Tool.OpenWorld, false);
+
+const PairReportProgressTool = Tool.make("pair_report_progress", {
+  description:
+    "Pair Room, assignee only: report progress on your assignment, or set blocked with a question when you cannot continue. The Lead sees it on the assignment card.",
+  parameters: PairReportProgressInput,
+  success: PairAckResult,
+  failure: PairToolError,
+  dependencies,
+})
+  .annotate(Tool.Title, "Report assignment progress")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, false)
+  .annotate(Tool.OpenWorld, false);
+
+const PairSubmitTool = Tool.make("pair_submit", {
+  description:
+    "Pair Room, assignee only: submit your assignment for the Lead's review with a summary, each acceptance criterion's result and evidence, tests run and known limitations. The server attaches the changed files and flags any outside your scope. Stop after submitting.",
+  parameters: PairSubmitInput,
+  success: PairAckResult,
+  failure: PairToolError,
+  dependencies,
+})
+  .annotate(Tool.Title, "Submit assignment")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, false)
+  .annotate(Tool.OpenWorld, false);
+
+const PairReviewTool = Tool.make("pair_review", {
+  description:
+    "Pair Room, Lead only: review an assignment. approve moves a submitted assignment to the user for merging (refused while files outside its scope changed). request-changes sends your notes back to the assignee. reject closes it without merging.",
+  parameters: PairReviewInput,
+  success: PairAckResult,
+  failure: PairToolError,
+  dependencies,
+})
+  .annotate(Tool.Title, "Review assignment")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, false)
+  .annotate(Tool.OpenWorld, false);
+
+const PairRecordDecisionTool = Tool.make("pair_record_decision", {
+  description:
+    "Pair Room, Lead or Peer: record a decision or a disagreement with your position and evidence, or add your position to an existing one by decisionId. The Lead may settle routine and architecture calls; product, security, scope and destructive calls stay open for the user.",
+  parameters: PairRecordDecisionInput,
+  success: PairAckResult,
+  failure: PairToolError,
+  dependencies,
+})
+  .annotate(Tool.Title, "Record decision")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, false)
+  .annotate(Tool.OpenWorld, false);
+
+export const PairToolkit = Toolkit.make(
+  PairStatusTool,
+  PairConsultTool,
+  PairWaitTool,
+  PairAssignTool,
+  PairReportProgressTool,
+  PairSubmitTool,
+  PairReviewTool,
+  PairRecordDecisionTool,
+);

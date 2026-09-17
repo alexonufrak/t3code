@@ -14,26 +14,24 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 export const PAIR_MIGRATIONS_TABLE = "pair_sql_migrations";
 
-const Migration0001PairEvents = Effect.gen(function* () {
+/**
+ * One row per room. The room record is small and bounded (see the limits in
+ * `@t3tools/contracts` pairRoom), so it is stored whole as JSON and loaded
+ * into memory at startup. Message bodies stay in the participant threads.
+ */
+const Migration0001PairRooms = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`
-    CREATE TABLE IF NOT EXISTS pair_events (
-      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-      event_id TEXT NOT NULL UNIQUE,
-      room_id TEXT NOT NULL,
-      event_type TEXT NOT NULL,
-      command_id TEXT NOT NULL UNIQUE,
-      occurred_at TEXT NOT NULL,
-      payload_json TEXT NOT NULL
+    CREATE TABLE IF NOT EXISTS pair_rooms (
+      room_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      room_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     )
-  `;
-  yield* sql`
-    CREATE INDEX IF NOT EXISTS idx_pair_events_room_sequence
-    ON pair_events(room_id, sequence)
   `;
 });
 
-const pairMigrationEntries = [[1, "PairEvents", Migration0001PairEvents]] as const;
+const pairMigrationEntries = [[1, "PairRooms", Migration0001PairRooms]] as const;
 
 const run = Migrator.make({});
 

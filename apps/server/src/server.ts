@@ -102,6 +102,9 @@ import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
 import * as VcsProcess from "./vcs/VcsProcess.ts";
+import * as PairCoordinator from "./pair/PairCoordinator.ts";
+import * as PairRoomStore from "./pair/PairRoomStore.ts";
+import * as PairWorkspace from "./pair/PairWorkspace.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
@@ -242,8 +245,13 @@ const HttpServerLive = Layer.unwrap(
 
 const PlatformServicesLive = NodeServices.layer;
 
+const PairCoordinatorLayerLive = PairCoordinator.layer.pipe(
+  Layer.provide(PairWorkspace.layer.pipe(Layer.provide(VcsProcess.layer))),
+);
+
 const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(OrchestrationReactorLive),
+  Layer.provideMerge(PairCoordinatorLayerLive),
   Layer.provideMerge(ProviderRuntimeIngestionLive),
   Layer.provideMerge(ProviderCommandReactorLive),
   Layer.provideMerge(CheckpointReactorLive),
@@ -452,6 +460,8 @@ const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
   Layer.provideMerge(ProviderUsageLimitsIngestionLive),
   Layer.provideMerge(ProviderLayerLive),
   Layer.provideMerge(OrchestrationLayerLive),
+  // ProviderService reads room membership to grant pair tools, so the store sits below it.
+  Layer.provideMerge(PairRoomStore.layer),
 );
 
 const AntigravityInstallationRefreshLive = Layer.effectDiscard(

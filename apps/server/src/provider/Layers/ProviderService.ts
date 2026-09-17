@@ -85,6 +85,7 @@ import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import { PAIR_ROOM_INSTRUCTIONS } from "../../pair/PairInstructions.ts";
+import { PairRoomStore } from "../../pair/PairRoomStore.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 const isModelSelection = Schema.is(ModelSelection);
@@ -483,6 +484,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const projectionQuery = yield* Effect.serviceOption(
     ProjectionSnapshotQuery.ProjectionSnapshotQuery,
   );
+  const pairRooms = yield* Effect.serviceOption(PairRoomStore);
   const issueMcpCredential =
     options?.issueMcpCredential ?? McpSessionRegistry.issueActiveMcpCredential;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -908,9 +910,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     threadId: ThreadId,
   ) {
     const capabilities = new Set<McpInvocationContext.McpCapability>(["pull-requests"]);
-    // Pair Room Phase 0 spike: T3CODE_PAIR_SPIKE=1 gives every thread the pair
-    // tools. Phase 1 grants "pair" only to threads that belong to a room.
-    if (process.env.T3CODE_PAIR_SPIKE === "1") capabilities.add("pair");
+    // Pair Room participants and assignees get the pair tools and operating rules.
+    if (Option.isSome(pairRooms) && Option.isSome(yield* pairRooms.value.findByThread(threadId))) {
+      capabilities.add("pair");
+    }
     const access = yield* agentAccessSettings(threadId);
     if (access.browser) capabilities.add("preview");
     if (access.device) capabilities.add("device");

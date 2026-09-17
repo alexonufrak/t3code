@@ -258,6 +258,13 @@ import {
   ProjectCloneSubscribeInput,
 } from "./projectClone.ts";
 import {
+  PairRoomCommandError,
+  PairRoomDispatchResult,
+  PairRoomUserCommand,
+  PairRoomsStreamItem,
+  PairRoomsSubscribeInput,
+} from "./pairRoom.ts";
+import {
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
   SourceControlDiscoveryResult,
@@ -419,6 +426,8 @@ export const WS_METHODS = {
   projectCloneCancel: "projectClone.cancel",
   projectCloneRetry: "projectClone.retry",
   subscribeProjectClones: "subscribeProjectClones",
+  pairRoomDispatch: "pairRoom.dispatch",
+  subscribePairRooms: "subscribePairRooms",
 
   // Streaming subscriptions
   subscribeVcsStatus: "subscribeVcsStatus",
@@ -881,6 +890,21 @@ const WsProjectCloneRetryRpc = Rpc.make(WS_METHODS.projectCloneRetry, {
 const WsSubscribeProjectClonesRpc = Rpc.make(WS_METHODS.subscribeProjectClones, {
   payload: ProjectCloneSubscribeInput,
   success: ProjectCloneListEvent,
+  error: EnvironmentAuthorizationError,
+  stream: true,
+});
+
+// Pair Room user commands. Agents use the pair_* MCP tools instead, so user
+// approvals (merges, decisions, extra rounds) cannot come from an agent.
+const WsPairRoomDispatchRpc = Rpc.make(WS_METHODS.pairRoomDispatch, {
+  payload: PairRoomUserCommand,
+  success: PairRoomDispatchResult,
+  error: Schema.Union([PairRoomCommandError, EnvironmentAuthorizationError]),
+});
+
+const WsSubscribePairRoomsRpc = Rpc.make(WS_METHODS.subscribePairRooms, {
+  payload: PairRoomsSubscribeInput,
+  success: PairRoomsStreamItem,
   error: EnvironmentAuthorizationError,
   stream: true,
 });
@@ -1426,6 +1450,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectCloneCancelRpc,
   WsProjectCloneRetryRpc,
   WsSubscribeProjectClonesRpc,
+  WsPairRoomDispatchRpc,
+  WsSubscribePairRoomsRpc,
   WsProjectsListEntriesRpc,
   WsProjectsReadFileRpc,
   WsProjectsSearchContentsRpc,

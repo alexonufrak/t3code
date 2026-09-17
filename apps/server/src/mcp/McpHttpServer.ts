@@ -29,8 +29,8 @@ import {
   PreviewSnapshotToolkit,
   PreviewStandardToolkit,
 } from "./toolkits/preview/tools.ts";
-import { PairSpikeToolkitHandlersLive } from "./toolkits/pair/handlers.ts";
-import { PairSpikeToolkit } from "./toolkits/pair/tools.ts";
+import { PairToolkitHandlersLive } from "./toolkits/pair/handlers.ts";
+import { PairToolkit } from "./toolkits/pair/tools.ts";
 import { PullRequestsToolkitHandlersLive } from "./toolkits/pullRequests/handlers.ts";
 import { PullRequestsToolkit } from "./toolkits/pullRequests/tools.ts";
 import {
@@ -610,8 +610,8 @@ export const PullRequestsToolkitRegistrationLive = McpServer.toolkit(PullRequest
   Layer.provide(PullRequestsToolkitHandlersLive),
 );
 
-export const PairToolkitRegistrationLive = McpServer.toolkit(PairSpikeToolkit).pipe(
-  Layer.provide(PairSpikeToolkitHandlersLive),
+export const PairToolkitRegistrationLive = McpServer.toolkit(PairToolkit).pipe(
+  Layer.provide(PairToolkitHandlersLive),
 );
 
 const DeviceStandardToolkitRegistrationLive = McpServer.toolkit(DeviceStandardToolkit).pipe(

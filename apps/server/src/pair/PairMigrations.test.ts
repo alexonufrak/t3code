@@ -15,7 +15,7 @@ it.layer(SqlitePersistenceMemory)("PairMigrations", (it) => {
       `;
 
       const executed = yield* runPairMigrations();
-      assert.deepEqual(executed, [[1, "PairEvents"]]);
+      assert.deepEqual(executed, [[1, "PairRooms"]]);
 
       const pairRows = yield* sql<{ readonly migrationId: number }>`
         SELECT migration_id AS "migrationId" FROM ${sql(PAIR_MIGRATIONS_TABLE)}
@@ -32,7 +32,7 @@ it.layer(SqlitePersistenceMemory)("PairMigrations", (it) => {
       assert.strictEqual(upstreamAfter[0]?.latest, migrationManifest.at(-1)?.[0]);
 
       const tables = yield* sql<{ readonly name: string }>`
-        SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pair_events'
+        SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pair_rooms'
       `;
       assert.strictEqual(tables.length, 1);
 

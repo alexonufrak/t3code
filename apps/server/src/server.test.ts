@@ -151,6 +151,8 @@ import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
+import * as PairCoordinator from "./pair/PairCoordinator.ts";
+import * as PairRoomStore from "./pair/PairRoomStore.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
@@ -937,6 +939,8 @@ const buildAppUnderTest = (options?: {
             ...options?.layers?.terminalManager,
           }),
           WorktreeSetupTracker.layer,
+          Layer.mock(PairCoordinator.PairCoordinator)({}),
+          Layer.mock(PairRoomStore.PairRoomStore)({ streamRooms: Stream.empty }),
           ProjectCloneTracker.layer.pipe(
             Layer.provide(
               Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
