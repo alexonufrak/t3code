@@ -13,6 +13,7 @@ import {
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import { readPairRoomNote } from "@t3tools/shared/pairRoomNote";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -320,6 +321,11 @@ describe("PairCoordinator", () => {
           "Pair Room consult from Fable (Lead). You are Astra (Peer).",
         );
         expect(turnStart?.message.text).toContain("Is retrying 401 responses safe?");
+        expect(readPairRoomNote(turnStart?.message.context)).toEqual({
+          purpose: "consult",
+          from: "fable",
+          to: "astra",
+        });
 
         const [started] = yield* harness.recorded("thread.activity.append");
         expect(started).toMatchObject({
@@ -643,6 +649,7 @@ describe("PairCoordinator", () => {
         const request = (yield* harness.recorded("thread.turn.start")).at(-1);
         expect(request?.threadId).toBe(LEAD);
         expect(request?.message.text).toContain("handing the Lead role from Fable to Astra");
+        expect(readPairRoomNote(request?.message.context)?.purpose).toBe("handoff-request");
         const refused = yield* harness.coordinator.consult(LEAD, { question: "Still there?" });
         expect(refused).toMatchObject({ status: "rejected", reason: "lead-switching" });
 
@@ -678,6 +685,11 @@ describe("PairCoordinator", () => {
         expect(handoffTurn?.threadId).toBe(newLead);
         expect(handoffTurn?.message.text).toContain("you are Astra, and you are now the Lead");
         expect(handoffTurn?.message.text).toContain("add jitter");
+        expect(readPairRoomNote(handoffTurn?.message.context)).toEqual({
+          purpose: "handoff",
+          from: "fable",
+          to: "astra",
+        });
       }),
     ),
   );

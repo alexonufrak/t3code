@@ -333,7 +333,12 @@ import {
 } from "../state/server";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
-import { pairRoomEnvironment, usePairRoomDraftStore } from "../state/pairRooms";
+import {
+  pairRoomEnvironment,
+  usePairRoomDraftStore,
+  usePairThreadMembership,
+} from "../state/pairRooms";
+import { pairThreadAuthorLabel } from "@t3tools/client-runtime/state/pair-room-index";
 import {
   requestOlderThreadTurns,
   threadHasOlderTurns,
@@ -1952,6 +1957,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
   const activeThreadShell = useThreadShell(isServerThread ? activeThreadRef : null);
+  const activePairMembership = usePairThreadMembership(isServerThread ? activeThreadRef : null);
   const [timelineAnchor, setTimelineAnchor] = useState<{
     readonly threadKey: string | null;
     readonly messageId: MessageId | null;
@@ -9502,6 +9508,9 @@ export default function ChatView(props: ChatViewProps) {
               {/* Messages — LegendList handles virtualization and scrolling internally */}
               <MessagesTimeline
                 citationRequest={paintOnlyDisplayedTimeline ? null : citationRequest}
+                {...(activePairMembership
+                  ? { assistantAuthor: pairThreadAuthorLabel(activePairMembership) }
+                  : {})}
                 citationHistoryLoading={threadDetailLoading}
                 {...(!paintOnlyDisplayedTimeline
                   ? {

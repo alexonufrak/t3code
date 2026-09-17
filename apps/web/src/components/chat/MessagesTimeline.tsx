@@ -125,6 +125,7 @@ import {
   SquarePenIcon,
   TerminalIcon,
   Undo2Icon,
+  UsersIcon,
   WrenchIcon,
   XIcon,
   ZapIcon,
@@ -133,7 +134,9 @@ import type {
   ComposerContextId,
   ComposerContextRecord,
   KnownComposerContextRecord,
+  PairRoomNote,
 } from "@t3tools/contracts";
+import { pairRoomNoteTitle, readPairRoomNote } from "@t3tools/shared/pairRoomNote";
 import { Button } from "../ui/button";
 import type { QueuedComposerMessage } from "../../queuedMessageStore";
 import { useAssetUrlRefresh, useAssetUrls, useAssetUrlState } from "../../assets/assetUrls";
@@ -275,6 +278,8 @@ interface TimelineRowSharedState {
   resolvedTheme: "light" | "dark";
   workspaceRoot: string | undefined;
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
+  /** Screen-reader heading for assistant replies, such as "Fable, Lead" in a pair room. */
+  assistantAuthor: string;
   activeThreadEnvironmentId: EnvironmentId;
   onRevertToTurnCount: (targetTurnCount: number, messageId: MessageId) => void;
   onUseArtifactTemplate: (template: CodexArtifactTemplate) => void;
@@ -394,6 +399,7 @@ const TIMELINE_MAINTAIN_SCROLL_AT_END_SMOOTH = {
 
 interface MessagesTimelineProps {
   citationRequest?: AssistantCitationRequest | null;
+  assistantAuthor?: string;
   citationHistoryLoading?: boolean;
   onCiteAssistantText?: (
     citation: AssistantCitation,
@@ -472,6 +478,7 @@ interface MessagesTimelineProps {
 
 export const MessagesTimeline = memo(function MessagesTimeline({
   citationRequest = null,
+  assistantAuthor = "T3 Code",
   citationHistoryLoading = false,
   onCiteAssistantText,
   isWorking,
@@ -1136,6 +1143,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       resolvedTheme,
       workspaceRoot,
       skills,
+      assistantAuthor,
       activeThreadEnvironmentId,
       onRevertToTurnCount,
       onUseArtifactTemplate,
@@ -1171,6 +1179,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       resolvedTheme,
       workspaceRoot,
       skills,
+      assistantAuthor,
       activeThreadEnvironmentId,
       onRevertToTurnCount,
       onUseArtifactTemplate,
@@ -1707,7 +1716,9 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "work-toggle" ? <WorkGroupToggleTimelineRow row={row} /> : null}
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow row={row} /> : null}
       {row.kind === "context-compaction" ? <ContextCompactionTimelineRow row={row} /> : null}
-      {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
+      {row.kind === "message" && row.message.role === "user" ? (
+        <UserOrRoomNoteRow row={row} />
+      ) : null}
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
       ) : null}
@@ -1848,6 +1859,65 @@ function QueuedMessageTimelineRow({
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * A user-role message the Pair Room sent on its own (a consult question, a
+ * brief, a handoff) reads as a room note, so it never looks like the user
+ * wrote it. The full prompt stays one click away.
+ */
+function UserOrRoomNoteRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+  const note = useMemo(() => readPairRoomNote(row.message.context), [row.message.context]);
+  return note ? <PairRoomNoteTimelineRow row={row} note={note} /> : <UserTimelineRow row={row} />;
+}
+
+function PairRoomNoteTimelineRow({
+  row,
+  note,
+}: {
+  row: Extract<TimelineRow, { kind: "message" }>;
+  note: PairRoomNote;
+}) {
+  const ctx = use(TimelineRowCtx);
+  const headingId = useId();
+  const [expanded, setExpanded] = useState(false);
+  const Icon = expanded ? ChevronDownIcon : ChevronRightIcon;
+
+  return (
+    <article aria-labelledby={headingId} className="min-w-0 px-1">
+      <div className="flex min-w-0 items-center gap-1.5 text-muted-foreground text-sm">
+        <UsersIcon aria-hidden="true" className="size-3.5 shrink-0" />
+        <h3 id={headingId} className="min-w-0 truncate">
+          Pair Room · {pairRoomNoteTitle(note)}
+        </h3>
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+          className="flex shrink-0 cursor-pointer items-center gap-0.5 rounded-md px-1 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70"
+        >
+          {expanded ? "Hide message" : "Show message"}
+          <Icon aria-hidden="true" className="size-3.5" />
+        </button>
+        <TimelineRowTimestamp
+          createdAt={row.message.createdAt}
+          timestampFormat={ctx.timestampFormat}
+          className="ms-auto"
+        />
+      </div>
+      {expanded ? (
+        <div className="mt-2 rounded-lg border border-border/70 bg-muted/30 px-3 py-2">
+          <ChatMarkdown
+            text={row.message.text}
+            cwd={ctx.markdownCwd}
+            threadRef={ctx.threadRef ?? undefined}
+            skills={ctx.skills}
+            headingLevelOffset={MESSAGE_HEADING_LEVEL}
+          />
+        </div>
+      ) : null}
+    </article>
   );
 }
 
@@ -2358,7 +2428,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
   return (
     <>
       <div className="relative min-w-0 px-1 py-0.5">
-        <MessageAuthorHeading>T3 Code</MessageAuthorHeading>
+        <MessageAuthorHeading>{ctx.assistantAuthor}</MessageAuthorHeading>
         <AssistantCitationSource
           messageId={row.message.id}
           {...(ctx.threadRef ? { threadRef: ctx.threadRef } : {})}

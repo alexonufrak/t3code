@@ -21,6 +21,7 @@ import {
   type PairPersona,
   type PairRoom,
   type PairRoomDispatchResult,
+  type PairRoomNote,
   type PairRoomUserCommand,
   type TurnId,
 } from "@t3tools/contracts";
@@ -31,6 +32,7 @@ import {
   pairMirrorProgressPayload,
   pairMirrorStartedPayload,
 } from "@t3tools/shared/pairMirror";
+import { pairRoomNoteContext } from "@t3tools/shared/pairRoomNote";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -444,6 +446,7 @@ export const make = Effect.gen(function* () {
     readonly persona: PairPersona;
     readonly runtimeMode: OrchestrationThreadShell["runtimeMode"];
     readonly text: string;
+    readonly note: PairRoomNote;
     readonly createdAt: string;
   }) =>
     Effect.gen(function* () {
@@ -456,6 +459,7 @@ export const make = Effect.gen(function* () {
           role: "user",
           text: input.text,
           attachments: [],
+          context: pairRoomNoteContext(`pair-room-note-${yield* uuid}`, input.note),
         },
         modelSelection: modelSelectionFor(input.persona),
         runtimeMode: input.runtimeMode,
@@ -672,6 +676,7 @@ export const make = Effect.gen(function* () {
           question: request.question,
           focusPaths: request.focusPaths,
         }),
+        note: { purpose: "consult", from: lead.persona, to: peerPersona },
         createdAt: consult.requestedAt,
       });
     }).pipe(
@@ -1011,6 +1016,7 @@ export const make = Effect.gen(function* () {
             persona: assignment.owner,
             runtimeMode: lead.shell.runtimeMode,
             text: assignmentBrief({ lead: lead.persona, assignment, brief: input.brief }),
+            note: { purpose: "assignment-brief", from: lead.persona, to: assignment.owner },
             createdAt: at,
           });
         }).pipe(
@@ -1241,6 +1247,7 @@ export const make = Effect.gen(function* () {
                 notes: input.notes,
                 deviations: assignment.deviations,
               }),
+              note: { purpose: "revision", from: caller.persona, to: assignment.owner },
               createdAt: yield* nowIso,
             });
             yield* mirror(next.room, {
@@ -1553,6 +1560,7 @@ export const make = Effect.gen(function* () {
             persona: assignment.owner,
             runtimeMode: lead.shell.runtimeMode,
             text: resumeRequest(assignment),
+            note: { purpose: "resume", from: lead.persona, to: assignment.owner },
             createdAt: at,
           });
           yield* mirror(next.room, {
@@ -1599,6 +1607,11 @@ export const make = Effect.gen(function* () {
             persona: lead.persona,
             runtimeMode: lead.shell.runtimeMode,
             text: handoffRequest({ from: lead.persona, to: next.leadSwitch!.toPersona }),
+            note: {
+              purpose: "handoff-request",
+              from: lead.persona,
+              to: next.leadSwitch!.toPersona,
+            },
             createdAt: at,
           }).pipe(
             Effect.catch((error: PairFailure) =>
@@ -1670,6 +1683,7 @@ export const make = Effect.gen(function* () {
                 branch: lead.shell.branch,
               },
             }),
+            note: { purpose: "handoff", from: lead.persona, to: toPersona },
             createdAt: at,
           });
           return { roomId: room.roomId, threadId: newLeadThreadId };

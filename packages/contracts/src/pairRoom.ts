@@ -69,6 +69,31 @@ export const PAIR_PERSONAS: Readonly<Record<PairPersona, PairPersonaProfile>> = 
 export const otherPairPersona = (persona: PairPersona): PairPersona =>
   persona === "fable" ? "astra" : "fable";
 
+/**
+ * A message the room sends into a thread on its own (a consult question, an
+ * assignment brief, a handoff) carries this record in its message context, so
+ * clients that know it show a room note instead of a message the user typed.
+ * The text never references the record, so providers see only the prompt.
+ */
+export const PAIR_ROOM_NOTE_CONTEXT_KIND = "pair-room-note";
+
+export const PairRoomNotePurpose = Schema.Literals([
+  "consult",
+  "assignment-brief",
+  "revision",
+  "resume",
+  "handoff-request",
+  "handoff",
+]);
+export type PairRoomNotePurpose = typeof PairRoomNotePurpose.Type;
+
+export const PairRoomNote = Schema.Struct({
+  purpose: PairRoomNotePurpose,
+  from: PairPersona,
+  to: PairPersona,
+});
+export type PairRoomNote = typeof PairRoomNote.Type;
+
 export const PairRoomMode = Schema.Literals(["adaptive", "pair", "roundtable"]);
 export type PairRoomMode = typeof PairRoomMode.Type;
 

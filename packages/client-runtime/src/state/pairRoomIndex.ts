@@ -95,6 +95,18 @@ export function pairRoomMembership(
 
 export const pairPersonaName = (persona: PairPersona) => PAIR_PERSONAS[persona].displayName;
 
+const PAIR_THREAD_ROLE_WORDS: Readonly<Record<PairThreadRole, string>> = {
+  lead: "Lead",
+  peer: "Peer",
+  assignee: "Assignment",
+  former: "earlier thread",
+};
+
+/** Who writes the replies in a room thread, as a heading reads it: "Fable, Lead". */
+export function pairThreadAuthorLabel(membership: PairThreadMembership): string {
+  return `${pairPersonaName(membership.persona)}, ${PAIR_THREAD_ROLE_WORDS[membership.role]}`;
+}
+
 /** Work waiting on the user: merges to approve and decisions only they can make. */
 export interface PairRoomAttention {
   readonly merges: ReadonlyArray<PairAssignment>;
