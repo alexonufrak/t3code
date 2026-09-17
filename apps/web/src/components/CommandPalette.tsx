@@ -55,6 +55,7 @@ import {
   SquarePenIcon,
   SunIcon,
   TextSearchIcon,
+  UsersIcon,
 } from "lucide-react";
 import {
   useCallback,
@@ -176,6 +177,7 @@ import {
 } from "./ThreadCommandSubtitle";
 import { ThreadRowLeadingStatus, ThreadRowTrailingStatus } from "./ThreadStatusIndicators";
 import { primaryServerKeybindingsAtom, primaryServerProvidersAtom } from "../state/server";
+import { usePairRoomDraftStore, usePairRoomsSupported } from "../state/pairRooms";
 import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../providerInstances";
 import { resolveShortcutCommand, threadJumpIndexFromCommand } from "../keybindings";
 import { CommandDialog, CommandDialogPopup, CommandFooterAction } from "./ui/command";
@@ -922,6 +924,9 @@ function OpenCommandPaletteDialog(props: {
         handleNewThread,
       }),
     [activeDraftThread, activeThread, defaultProjectRef, handleNewThread],
+  );
+  const contextualProjectSupportsPairRooms = usePairRoomsSupported(
+    contextualProjectRef?.environmentId ?? null,
   );
   const projectPickerEntries = useMemo(
     () =>
@@ -1759,6 +1764,24 @@ function OpenCommandPaletteDialog(props: {
             defaultProjectRef,
             handleNewThread,
           });
+        },
+      });
+    }
+
+    if (activeProjectTitle && contextualProjectRef && contextualProjectSupportsPairRooms) {
+      actionItems.push({
+        kind: "action",
+        value: "action:new-pair-room",
+        searchTerms: ["pair room", "pair", "fable", "astra", "peer", "lead", "new thread"],
+        title: (
+          <>
+            New pair room in <span className="font-semibold">{activeProjectTitle}</span>
+          </>
+        ),
+        icon: <UsersIcon className={ITEM_ICON_CLASS} />,
+        run: async () => {
+          const created = await handleNewThread(contextualProjectRef);
+          if (created) usePairRoomDraftStore.getState().requestSetup(created.draftId);
         },
       });
     }

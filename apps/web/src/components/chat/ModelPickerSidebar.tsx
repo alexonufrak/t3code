@@ -1,7 +1,7 @@
 import { Toolbar } from "@base-ui/react/toolbar";
 import { type ProviderInstanceId } from "@t3tools/contracts";
 import { memo, useLayoutEffect, useRef, useState } from "react";
-import { SparklesIcon, StarIcon } from "lucide-react";
+import { SparklesIcon, StarIcon, UsersIcon } from "lucide-react";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
@@ -65,11 +65,15 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
    * instances are never flagged — the user just made them).
    */
   newBadgeInstanceIds?: ReadonlySet<ProviderInstanceId>;
+  /** Renders the Pair room rail entry, which replaces the model list with room setup. */
+  pairRoom?: { readonly selected: boolean; readonly onSelect: () => void };
 }) {
   const handleSelect = (instanceId: ProviderInstanceId | "favorites") => {
     props.onSelectInstance(instanceId);
   };
   const showFavorites = props.showFavorites ?? true;
+  const pairRoomSelected = props.pairRoom?.selected === true;
+  const selectedRailKey = pairRoomSelected ? "pair-room" : props.selectedInstanceId;
   const [hoveredInstanceId, setHoveredInstanceId] = useState<ProviderInstanceId | null>(null);
   const sidebarContentRef = useRef<HTMLDivElement>(null);
   const [selectedIndicatorTop, setSelectedIndicatorTop] = useState<number | null>(null);
@@ -80,13 +84,13 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
     }
     const selectedItem = Array.from(
       content.querySelectorAll<HTMLElement>("[data-model-picker-provider]"),
-    ).find((item) => item.dataset.modelPickerProvider === props.selectedInstanceId);
+    ).find((item) => item.dataset.modelPickerProvider === selectedRailKey);
     if (!selectedItem) {
       setSelectedIndicatorTop(null);
       return;
     }
     setSelectedIndicatorTop(selectedItem.offsetTop + selectedItem.offsetHeight / 2 - 10);
-  }, [props.instanceEntries, props.selectedInstanceId, showFavorites]);
+  }, [props.instanceEntries, selectedRailKey, showFavorites]);
 
   return (
     <Toolbar.Root
@@ -129,7 +133,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                         onClick={() => handleSelect("favorites")}
                         type="button"
                         aria-label="Favorites"
-                        aria-pressed={props.selectedInstanceId === "favorites"}
+                        aria-pressed={selectedRailKey === "favorites"}
                       >
                         <StarIcon className="size-5 fill-current shrink-0" aria-hidden />
                       </Toolbar.Button>
@@ -149,6 +153,37 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
             </>
           ) : null}
 
+          {props.pairRoom ? (
+            <>
+              <div className="relative w-full" data-model-picker-provider="pair-room">
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Toolbar.Button
+                        className="relative isolate flex w-full cursor-pointer aspect-square items-center justify-center rounded-md transition-colors hover:bg-[color-mix(in_srgb,var(--popover)_90%,var(--contrast-foreground))] focus-visible:bg-[color-mix(in_srgb,var(--popover)_90%,var(--contrast-foreground))] focus-visible:outline-none"
+                        onClick={props.pairRoom.onSelect}
+                        type="button"
+                        aria-label="Pair room"
+                        aria-pressed={pairRoomSelected}
+                      >
+                        <UsersIcon className="size-5 shrink-0" aria-hidden />
+                      </Toolbar.Button>
+                    }
+                  />
+                  <TooltipPopup
+                    side={PICKER_TOOLTIP_SIDE}
+                    sideOffset={PICKER_TOOLTIP_SIDE_OFFSET}
+                    align="center"
+                    className={PICKER_TOOLTIP_CLASS}
+                  >
+                    Pair room: Fable and Astra together
+                  </TooltipPopup>
+                </Tooltip>
+              </div>
+              <div className="border-b border-border/70" aria-hidden="true" />
+            </>
+          ) : null}
+
           {/* Instance buttons (one per configured instance — built-in + custom) */}
           {props.instanceEntries.map((entry) => {
             const isUnavailable = !isProviderInstancePickerReady(entry);
@@ -157,7 +192,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
               props.selectableUnavailableInstanceIds?.has(entry.instanceId) ?? false;
             const isDisabled =
               (isUnavailable && !unavailableSelectionIsReachable) || isContextDisabled;
-            const isSelected = props.selectedInstanceId === entry.instanceId;
+            const isSelected = selectedRailKey === entry.instanceId;
             const isHovered = hoveredInstanceId === entry.instanceId;
             const showNewBadge = props.newBadgeInstanceIds?.has(entry.instanceId) ?? false;
             const showInstanceBadge = shouldShowInstanceBadge(entry, props.instanceEntries);

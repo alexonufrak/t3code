@@ -75,6 +75,14 @@ const T3_MCP_TOOL_LABELS: Record<
   string,
   readonly [action: string, running: string, completed: string, detail: string]
 > = {
+  pair_status: ["Check", "Checking", "Checked", "the pair room"],
+  pair_consult: ["Consult", "Consulting", "Consulted", "the Peer"],
+  pair_wait: ["Wait", "Waiting", "Waited", "for pair work"],
+  pair_assign: ["Assign", "Assigning", "Assigned", "work to the Peer"],
+  pair_report_progress: ["Report", "Reporting", "Reported", "assignment progress"],
+  pair_submit: ["Submit", "Submitting", "Submitted", "the assignment"],
+  pair_review: ["Review", "Reviewing", "Reviewed", "an assignment"],
+  pair_record_decision: ["Record", "Recording", "Recorded", "a pair decision"],
   link_pull_request: ["Link", "Linking", "Linked", "a pull request"],
   unlink_pull_request: ["Unlink", "Unlinking", "Unlinked", "a pull request"],
   list_thread_pull_requests: ["Check", "Checking", "Checked", "linked pull requests"],

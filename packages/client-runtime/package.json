@@ -147,6 +147,14 @@
       "types": "./src/state/deviceHubAccess.ts",
       "default": "./src/state/deviceHubAccess.ts"
     },
+    "./state/pair-room-index": {
+      "types": "./src/state/pairRoomIndex.ts",
+      "default": "./src/state/pairRoomIndex.ts"
+    },
+    "./state/pair-rooms": {
+      "types": "./src/state/pairRooms.ts",
+      "default": "./src/state/pairRooms.ts"
+    },
     "./state/preview": {
       "types": "./src/state/preview.ts",
       "default": "./src/state/preview.ts"

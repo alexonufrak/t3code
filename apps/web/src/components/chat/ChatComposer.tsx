@@ -35,6 +35,7 @@ import type {
   SnapShotSource,
 } from "@t3tools/contracts";
 import {
+  PAIR_PERSONAS,
   ProviderDriverKind,
   ProviderInstanceId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
@@ -146,6 +147,7 @@ import {
   type ComposerBannerStackItem,
 } from "./ComposerBannerStack";
 import { compressImageForStash, prepareImageForAttachment } from "../../lib/imageCompression";
+import { pairPersonaName } from "@t3tools/client-runtime/state/pair-room-index";
 import {
   fileAttachmentTooLargeMessage,
   formatAttachmentSize,
@@ -975,6 +977,13 @@ import { searchProviderSkills } from "../../providerSkillSearch";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { serverEnvironment } from "../../state/server";
+import {
+  usePairRoomDraft,
+  usePairRoomDraftStore,
+  usePairRoomsSupported,
+  type PairRoomDraft,
+} from "../../state/pairRooms";
+import { PairRoomSetupPanel } from "../pair/PairRoomSetupPanel";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
 
 const WORKSPACE_SNAPSHOT_RETRY_COOLDOWN_MS = 10_000;
@@ -1454,7 +1463,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeThread,
     promptHistoryMessages,
     isServerThread: _isServerThread,
-    isLocalDraftThread: _isLocalDraftThread,
+    isLocalDraftThread,
     forceExpandedOnMobile,
     projectSelectionRequired,
     phase,
@@ -2056,7 +2065,84 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isDragOverComposer, setIsDragOverComposer] = useState(false);
   const [isComposerFooterCompact, setIsComposerFooterCompact] = useState(false);
   const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
-  const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
+  const [modelPickerOpenState, setModelPickerOpenState] = useState(false);
+  // A draft can become a Pair Room before its first send. The picker offers
+  // setup, and choosing a model that is not the Lead's turns the room off.
+  const pairRoomDraftId = isLocalDraftThread ? draftId : null;
+  const pairRoomsSupported = usePairRoomsSupported(environmentId);
+  const pairRoomDraft = usePairRoomDraft(pairRoomDraftId);
+  const setPairRoomDraft = usePairRoomDraftStore((state) => state.set);
+  const clearPairRoomDraft = usePairRoomDraftStore((state) => state.clear);
+  const requestPairRoomSetup = usePairRoomDraftStore((state) => state.requestSetup);
+  const pairRoomSetupRequested = usePairRoomDraftStore(
+    (state) => pairRoomDraftId !== null && state.setupRequestedDraftId === pairRoomDraftId,
+  );
+  // "New pair room" opens this draft's picker on setup until the picker closes.
+  const isComposerModelPickerOpen =
+    modelPickerOpenState || (pairRoomSetupRequested && pairRoomsSupported);
+  const setIsComposerModelPickerOpen = useCallback(
+    (open: boolean) => {
+      setModelPickerOpenState(open);
+      if (!open && pairRoomSetupRequested) requestPairRoomSetup(null);
+    },
+    [pairRoomSetupRequested, requestPairRoomSetup],
+  );
+  const handlePairRoomDraftChange = useCallback(
+    (draft: PairRoomDraft | null) => {
+      if (pairRoomDraftId === null) return;
+      if (draft === null) {
+        clearPairRoomDraft(pairRoomDraftId);
+      } else {
+        setPairRoomDraft(pairRoomDraftId, draft);
+        const lead = PAIR_PERSONAS[draft.leadPersona];
+        onProviderModelSelect(lead.instanceId, lead.model);
+      }
+      setIsComposerModelPickerOpen(false);
+    },
+    [
+      clearPairRoomDraft,
+      setIsComposerModelPickerOpen,
+      onProviderModelSelect,
+      pairRoomDraftId,
+      setPairRoomDraft,
+    ],
+  );
+  const handlePickerModelSelect = useCallback(
+    (instanceId: ProviderInstanceId, model: string) => {
+      if (
+        pairRoomDraftId !== null &&
+        pairRoomDraft !== null &&
+        model !== PAIR_PERSONAS[pairRoomDraft.leadPersona].model
+      ) {
+        clearPairRoomDraft(pairRoomDraftId);
+      }
+      onProviderModelSelect(instanceId, model);
+    },
+    [clearPairRoomDraft, onProviderModelSelect, pairRoomDraft, pairRoomDraftId],
+  );
+  const pairRoomPicker = useMemo(
+    () =>
+      pairRoomsSupported && pairRoomDraftId !== null
+        ? {
+            active: pairRoomDraft !== null || pairRoomSetupRequested,
+            panel: (
+              <PairRoomSetupPanel
+                providers={providerStatuses}
+                value={pairRoomDraft}
+                onChange={handlePairRoomDraftChange}
+              />
+            ),
+          }
+        : undefined,
+    [
+      handlePairRoomDraftChange,
+      pairRoomDraft,
+      pairRoomDraftId,
+      pairRoomSetupRequested,
+      pairRoomsSupported,
+      providerStatuses,
+    ],
+  );
   const isMobileViewport = useMediaQuery("max-sm");
   const {
     isComposerFocused,
@@ -4983,8 +5069,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           : {})}
         onOpenChange={setIsComposerModelPickerOpen}
         getModelDisabledReason={getModelDisabledReason}
-        onInstanceModelChange={onProviderModelSelect}
+        onInstanceModelChange={handlePickerModelSelect}
         onOpenProviderSetup={onOpenProviderSetup}
+        {...(pairRoomPicker ? { pairRoom: pairRoomPicker } : {})}
+        {...(pairRoomDraft
+          ? {
+              triggerLabel: `Pair · ${pairPersonaName(pairRoomDraft.leadPersona)} leads`,
+              triggerAriaLabel: `Pair room, ${pairPersonaName(pairRoomDraft.leadPersona)} leads. Change`,
+            }
+          : {})}
       />
 
       {composerControlsCompact ? (

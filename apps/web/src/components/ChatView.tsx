@@ -333,6 +333,7 @@ import {
 } from "../state/server";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
+import { pairRoomEnvironment, usePairRoomDraftStore } from "../state/pairRooms";
 import {
   requestOlderThreadTurns,
   threadHasOlderTurns,
@@ -1490,6 +1491,7 @@ export default function ChatView(props: ChatViewProps) {
     reportFailure: false,
   });
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
+  const dispatchPairRoom = useAtomCommand(pairRoomEnvironment.dispatch, { reportFailure: false });
   const createAttachmentAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
     refresh: true,
@@ -7939,6 +7941,29 @@ export default function ChatView(props: ChatViewProps) {
       failure = turnAttachmentsResult;
     }
 
+    // A draft set up as a Pair Room gets its room before the first turn, so
+    // the Lead's provider session starts with the pair tools.
+    const pairRoomDraftForSend =
+      isLocalDraftThread && draftId
+        ? (usePairRoomDraftStore.getState().byDraftId[draftId] ?? null)
+        : null;
+    if (failure === null && pairRoomDraftForSend !== null) {
+      const roomResult = await dispatchPairRoom({
+        environmentId,
+        input: {
+          type: "room.create",
+          projectId: activeProject.id,
+          leadThreadId: threadIdForSend,
+          leadPersona: pairRoomDraftForSend.leadPersona,
+          mode: pairRoomDraftForSend.mode,
+          maxRoundsPerTurn: pairRoomDraftForSend.maxRoundsPerTurn,
+        },
+      });
+      if (roomResult._tag === "Failure") {
+        failure = roomResult;
+      }
+    }
+
     let turnStartSucceeded = false;
     let backgroundDraftOpened = false;
     if (failure === null && turnAttachmentsResult._tag === "Success") {
@@ -8052,6 +8077,9 @@ export default function ChatView(props: ChatViewProps) {
         failure = startResult;
       } else {
         turnStartSucceeded = true;
+        if (pairRoomDraftForSend !== null && draftId) {
+          usePairRoomDraftStore.getState().clear(draftId);
+        }
         // The turn is under way and will spend quota, so that thread's limits
         // snapshot is stale. Uploads may have outlasted a navigation, so only
         // the sending thread's panel clears.

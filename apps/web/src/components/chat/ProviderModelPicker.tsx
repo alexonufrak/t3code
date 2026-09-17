@@ -4,7 +4,7 @@ import {
   type ProviderDriverKind,
   type ResolvedKeybindingsConfig,
 } from "@t3tools/contracts";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { VariantProps } from "class-variance-authority";
 import { Badge } from "../ui/badge";
 import { buttonVariants } from "../ui/button";
@@ -56,6 +56,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   onOpenProviderSetup?: (instanceId: ProviderInstanceId) => void;
   getModelDisabledReason?: (instanceId: ProviderInstanceId, model: string) => string | null;
   onInstanceModelChange: (instanceId: ProviderInstanceId, model: string) => void;
+  pairRoom?: { readonly active: boolean; readonly panel: ReactNode };
 }) {
   const composerFloatingLayerProps = useComposerMenuProps();
   const [uncontrolledIsMenuOpen, setUncontrolledIsMenuOpen] = useState(false);
@@ -251,6 +252,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
             ? { getModelDisabledReason: props.getModelDisabledReason }
             : {})}
           onInstanceModelChange={handleInstanceModelChange}
+          {...(props.pairRoom ? { pairRoom: props.pairRoom } : {})}
         />
       </PopoverPopup>
     </Popover>

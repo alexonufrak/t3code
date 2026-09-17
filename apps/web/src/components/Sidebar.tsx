@@ -132,6 +132,8 @@ import {
 } from "../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
 import { vcsEnvironment } from "../state/vcs";
+import { usePairRoomSidebarIndex } from "../state/pairRooms";
+import { nestPairRoomItems } from "@t3tools/client-runtime/state/pair-room-index";
 import { threadEnvironment } from "../state/threads";
 import { useEnvironmentQuery } from "../state/query";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -1024,6 +1026,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
    * composer. Absent when the sidebar cannot open server threads.
    */
   onFileDropThreads?: ((threadRef: ScopedThreadRef, files: File[]) => void) | undefined;
+  /** "Pair", "Peer" or "Assignment" for Pair Room threads. */
+  pairRoleLabel: string | null;
+  /** Indents a Peer or assignment row listed under its Lead. */
+  nested: boolean;
 }) {
   const {
     isRenaming,
@@ -1574,6 +1580,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     )
   ) : null;
 
+  const pairRoleBadge = props.pairRoleLabel ? (
+    <span className="shrink-0 rounded-sm border border-border/70 px-1 text-[10px] leading-4 text-secondary-label">
+      {props.pairRoleLabel}
+    </span>
+  ) : null;
+
   if (variant === "slim") {
     return (
       <li
@@ -1583,6 +1595,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         className={cn(
           // Matches the h-9 row so unrendered rows never shift the list when they paint.
           "list-none [content-visibility:auto] [contain-intrinsic-size:auto_36px]",
+          props.nested && "ps-3",
           sortable?.isDragging && "relative z-20",
         )}
       >
@@ -1616,6 +1629,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             </span>
             {draftIndicator}
             {title}
+            {pairRoleBadge}
             {pinIndicator}
             {terminalStatusIcon}
             {isRegeneratingTitle ? (
@@ -1736,6 +1750,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       className={cn(
         // Matches the h-[4.875rem] content box; the py-0.5 padding is added on top.
         "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_78px]",
+        props.nested && "ps-3",
         sortable?.isDragging && "relative z-20",
       )}
     >
@@ -1762,6 +1777,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               {props.project ? (
                 <ProjectFavicon project={props.project} className="size-4 shrink-0" />
               ) : null}
+              {pairRoleBadge}
               {props.projectDisplayName ? (
                 <span
                   className={cn(
@@ -3127,6 +3143,7 @@ export default function Sidebar() {
   // Hold the chosen section and order until every key write arrives. This
   // also covers first-time ordering, which assigns keys to keyless neighbors.
   // A failed write, concurrent reorder, or membership change releases the hold.
+  const pairRoomSidebarIndex = usePairRoomSidebarIndex();
   const [dragState, setDragState] = useState<{
     readonly activeKey: string;
     readonly activeSection: SidebarSection;
@@ -3328,10 +3345,13 @@ export default function Sidebar() {
       list: readonly EnvironmentThreadShell[],
       section: SidebarSection,
     ): SidebarListItem[] =>
-      list.map((thread) => {
-        const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
-        return { kind: "thread", key, section };
-      });
+      nestPairRoomItems(
+        list.map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
+        (key) => key,
+        pairRoomSidebarIndex.parents,
+      ).map(({ item: key, depth }) =>
+        depth === 1 ? { kind: "thread", key, section, depth } : { kind: "thread", key, section },
+      );
     if (
       pinnedThreads.length +
         activeThreads.length +
@@ -3359,6 +3379,7 @@ export default function Sidebar() {
     return items;
   }, [
     activeThreads,
+    pairRoomSidebarIndex,
     pinnedThreads,
     renderedSettledThreads,
     settledThreads.length,
@@ -4625,6 +4646,7 @@ export default function Sidebar() {
                       const renderThreadRowInner = (
                         thread: EnvironmentThreadShell,
                         section: SidebarSection,
+                        nested: boolean,
                         sortable?: SortableThreadRowBag,
                       ) => {
                         const threadKey = scopedThreadKey(
@@ -4727,12 +4749,15 @@ export default function Sidebar() {
                             onUnpin={attemptUnpin}
                             onAcknowledgeWoke={acknowledgeWoke}
                             onFileDropThreads={handleThreadFileDrop}
+                            pairRoleLabel={pairRoomSidebarIndex.labels.get(threadKey) ?? null}
+                            nested={nested}
                           />
                         );
                       };
                       const renderThreadRow = (
                         thread: EnvironmentThreadShell,
                         section: SidebarSection,
+                        nested: boolean,
                       ) => {
                         const threadKey = scopedThreadKey(
                           scopeThreadRef(thread.environmentId, thread.id),
@@ -4745,7 +4770,7 @@ export default function Sidebar() {
                               !draggableThreadKeys.has(threadKey) || optimisticDrop !== null
                             }
                           >
-                            {(bag) => renderThreadRowInner(thread, section, bag)}
+                            {(bag) => renderThreadRowInner(thread, section, nested, bag)}
                           </SortableThreadRow>
                         );
                       };
@@ -4762,7 +4787,13 @@ export default function Sidebar() {
                       ];
                       for (const item of sidebarListItems) {
                         if (item.kind === "thread") {
-                          items.push(renderThreadRow(threadByKey.get(item.key)!, item.section));
+                          items.push(
+                            renderThreadRow(
+                              threadByKey.get(item.key)!,
+                              item.section,
+                              item.depth === 1,
+                            ),
+                          );
                           continue;
                         }
                         switch (item.marker) {

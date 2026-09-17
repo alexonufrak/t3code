@@ -585,6 +585,18 @@ describe("resolveViewedImageAsset", () => {
   });
 });
 
+describe("pair room tool presentation", () => {
+  it.each([
+    ["mcp__t3-code__pair_consult", "inProgress", "Consulting the Peer"],
+    ["T3-code · pair_assign", "completed", "Assigned work to the Peer"],
+    ["pair_wait", "failed", "Failed to wait for pair work"],
+  ])("names %s while %s", (label, toolLifecycleStatus, displayName) => {
+    expect(resolveWorkEntryToolPresentation({ label, toolLifecycleStatus })?.displayName).toBe(
+      displayName,
+    );
+  });
+});
+
 describe("pull request tool presentation", () => {
   it.each([
     "mcp__t3-code__link_pull_request",
