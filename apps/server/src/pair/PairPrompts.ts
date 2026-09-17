@@ -27,34 +27,87 @@ const CONSULT_ASKS: Readonly<Record<PairConsultKind, string>> = {
     "Give your own independent proposal. The Lead has already recorded theirs and will compare after you answer, so do not guess what it is.",
 };
 
+/**
+ * Who asked: the Lead through pair_consult, the pair mode review guardrail,
+ * or the user, whose message the server sent to the Peer as well.
+ */
+export type PairConsultSource = "lead" | "review" | "user";
+
+function consultOrigin(input: {
+  readonly lead: PairPersona;
+  readonly peer: PairPersona;
+  readonly kind: PairConsultKind;
+  readonly source: PairConsultSource;
+}): { readonly origin: string; readonly ask: string } {
+  const you = `You are ${name(input.peer)} (Peer).`;
+  switch (input.source) {
+    case "lead":
+      return {
+        origin: `Pair Room consult from ${name(input.lead)} (Lead). ${you}`,
+        ask: CONSULT_ASKS[input.kind],
+      };
+    case "review":
+      return {
+        origin: `Pair Room automatic review of ${name(input.lead)}'s (Lead) last turn. ${you}`,
+        ask: CONSULT_ASKS.review,
+      };
+    case "user":
+      return input.kind === "roundtable"
+        ? {
+            origin: `Pair Room roundtable: the user's message below went to both participants. ${you} ${name(input.lead)} (Lead) is answering it at the same time without seeing your answer, then compares both and gives the user the final answer.`,
+            ask: "Give your own independent answer or proposal.",
+          }
+        : {
+            origin: `Pair Room: the user addressed you directly. ${you} ${name(input.lead)} (Lead) is replying to the same message and responds to your answer once you finish.`,
+            ask: "Answer the user's message with evidence from the code.",
+          };
+  }
+}
+
 export function consultPrompt(input: {
   readonly lead: PairPersona;
   readonly peer: PairPersona;
   readonly kind: PairConsultKind;
+  readonly source: PairConsultSource;
   readonly round: number;
   readonly roundLimit: number | null;
-  readonly automatic: boolean;
   readonly snapshotCommit: string;
   readonly question: string;
   readonly focusPaths: ReadonlyArray<string>;
 }): string {
-  const origin = input.automatic
-    ? `Pair Room automatic review of ${name(input.lead)}'s (Lead) last turn. You are ${name(input.peer)} (Peer).`
-    : `Pair Room consult from ${name(input.lead)} (Lead). You are ${name(input.peer)} (Peer).`;
+  const { origin, ask } = consultOrigin(input);
   const lines = [
     origin,
     input.roundLimit === null
       ? `Kind: ${input.kind}.`
       : `Kind: ${input.kind}. Round ${input.round} of ${input.roundLimit} for this Lead turn.`,
     `Your working directory is a snapshot of the Lead's checkout (${input.snapshotCommit.slice(0, 12)}), including uncommitted files. Read anything you need. Do not edit files: edits here are thrown away and flagged.`,
-    CONSULT_ASKS[input.kind],
+    ask,
     "Reply concisely with conclusions and evidence (file paths, line numbers, commands you ran). If you and the Lead disagree on something material, say so and call pair_record_decision.",
   ];
   if (input.focusPaths.length > 0) {
     lines.push(`Focus on:\n${bulletList(input.focusPaths)}`);
   }
-  lines.push("", input.question);
+  lines.push(
+    "",
+    input.source === "user" ? `The user's message:\n\n${input.question}` : input.question,
+  );
   return lines.join("\n");
+}
+
+/** Brings the Peer's answer to a relayed user message back to the Lead. */
+export function peerAnswerPrompt(input: {
+  readonly lead: PairPersona;
+  readonly peer: PairPersona;
+  readonly kind: PairConsultKind;
+  readonly answer: string;
+}): string {
+  const peer = name(input.peer);
+  const ask =
+    input.kind === "roundtable"
+      ? `Pair Room roundtable: ${peer} (Peer) answered the user's last message independently, and the user can see that answer in the room. Compare it with yours: say briefly where you agree, where you differ and why, then give the final recommendation. Do not restate either answer in full. If you disagree on something material that the user should decide, record it with pair_record_decision.`
+      : `Pair Room: the user asked ${peer} (Peer) directly, and the user can see ${peer}'s answer in the room. Respond to it in a few sentences: whether you agree, what you would add or change, and what to do next. Do not restate it.`;
+  return [ask, "", `${peer}'s answer:`, "", input.answer].join("\n");
 }
 
 const ARTIFACT_INSTRUCTIONS: Readonly<Record<PairAssignment["expectedArtifact"], string>> = {
@@ -112,7 +165,7 @@ const MODE_GUIDANCE: Readonly<Record<PairRoomMode, string>> = {
     "Adaptive: consult the Peer when a second opinion would change the outcome (risky changes, unclear requirements, debugging dead ends). Skip it for routine work.",
   pair: "Pair: review-first. Consult the Peer before finalizing any code change. If you finish a turn that changed files without a review consult, the server starts one automatically.",
   roundtable:
-    "Roundtable: for design questions, form your own proposal first and pass it as leadProposal to pair_consult with kind roundtable, so both proposals are independent. Then synthesize.",
+    "Roundtable: the server sends each user message to the Peer as well, and starts a turn for you with the Peer's independent answer once your own turn ends. Answer the user's message yourself first, without waiting for the Peer or consulting it about that message. When the Peer's answer arrives, compare and give the final recommendation.",
 };
 
 export function roleGuidance(input: {

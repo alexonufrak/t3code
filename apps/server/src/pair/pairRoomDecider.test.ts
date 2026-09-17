@@ -73,6 +73,13 @@ const settle = (consultId: string): PairRoomCommand => ({
   at: AT,
 });
 
+const delivered = (consultId: string, at = AT): PairRoomCommand => ({
+  type: "consult.answer-delivered",
+  roomId: ROOM_ID,
+  consultId,
+  at,
+});
+
 const assign = (assignmentId: string, scopeGlobs: ReadonlyArray<string>): PairRoomCommand => ({
   type: "assignment.create",
   roomId: ROOM_ID,
@@ -163,6 +170,36 @@ describe("decidePairRoom", () => {
       at: "2026-09-17T11:00:00.000Z",
     });
     expect(again.consults[0]).toMatchObject({ status: "answered", error: null, settledAt: AT });
+  });
+
+  it("marks a relayed answer delivered once, and only after the Peer finished", () => {
+    const rooms = createRoom("roundtable");
+    apply(rooms, consult("relay", { automatic: true, answerTo: "lead-turn", leadTurnId: null }));
+    expect(apply(rooms, delivered("relay")).consults[0]?.answerDeliveredAt).toBeNull();
+    apply(rooms, settle("relay"));
+    expect(apply(rooms, delivered("relay")).consults[0]?.answerDeliveredAt).toBe(AT);
+    const later = "2026-09-17T11:00:00.000Z";
+    expect(apply(rooms, delivered("relay", later)).consults[0]?.answerDeliveredAt).toBe(AT);
+
+    apply(rooms, consult("tool"));
+    apply(rooms, settle("tool"));
+    expect(apply(rooms, delivered("tool")).consults[1]).toMatchObject({
+      answerTo: "tool",
+      answerDeliveredAt: null,
+    });
+  });
+
+  it("keeps an answer still owed to the Lead however many consults settle after it", () => {
+    const rooms = createRoom("roundtable");
+    apply(rooms, consult("relay", { automatic: true, answerTo: "lead-turn", leadTurnId: null }));
+    apply(rooms, settle("relay"));
+    for (let index = 0; index < PAIR_ROOM_SETTLED_CONSULTS_KEPT + 2; index += 1) {
+      apply(rooms, consult(`c${index}`, { automatic: true }));
+      apply(rooms, settle(`c${index}`));
+    }
+    expect(rooms.get(ROOM_ID)?.consults[0]?.consultId).toBe("relay");
+    const trimmed = apply(rooms, delivered("relay"));
+    expect(trimmed.consults.some((entry) => entry.consultId === "relay")).toBe(false);
   });
 
   it("keeps running consults and only the newest settled ones", () => {

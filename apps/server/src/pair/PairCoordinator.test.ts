@@ -1,10 +1,12 @@
 import {
+  MessageId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
   TurnId,
   type OrchestrationCommand,
   type OrchestrationEvent,
+  type OrchestrationMessageContext,
   type OrchestrationProjectShell,
   type OrchestrationThread,
   type OrchestrationThreadShell,
@@ -13,7 +15,7 @@ import {
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
-import { readPairRoomNote } from "@t3tools/shared/pairRoomNote";
+import { pairRoomNoteContext, readPairRoomNote } from "@t3tools/shared/pairRoomNote";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -257,7 +259,37 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
       Effect.map(Option.getOrThrow),
     );
 
-  const createRoom = (mode: "adaptive" | "pair" = "adaptive") =>
+  let userMessages = 0;
+  /** Lands a message the user typed on the Lead's thread, as the turn it starts announces it. */
+  const sendUserMessage = Effect.fn("sendUserMessage")(function* (input: {
+    readonly text: string;
+    readonly createdAt: string;
+    readonly context?: OrchestrationMessageContext;
+  }) {
+    userMessages += 1;
+    const messageId = MessageId.make(`user-message-${userMessages}`);
+    yield* Ref.update(messages, (all) =>
+      new Map(all).set(LEAD, [
+        ...(all.get(LEAD) ?? []),
+        {
+          id: messageId,
+          role: "user",
+          text: input.text,
+          context: input.context,
+          turnId: null,
+          streaming: false,
+          createdAt: input.createdAt,
+          updatedAt: input.createdAt,
+        },
+      ] as unknown as OrchestrationThread["messages"]),
+    );
+    yield* PubSub.publish(
+      domainEvents,
+      threadEvent("thread.turn-start-requested", LEAD, { messageId, createdAt: input.createdAt }),
+    );
+  });
+
+  const createRoom = (mode: "adaptive" | "pair" | "roundtable" = "adaptive") =>
     coordinator
       .dispatchUserCommand({
         type: "room.create",
@@ -277,6 +309,7 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
     finishTurn,
     roomWhere,
     createRoom,
+    sendUserMessage,
     changedFiles,
     integration,
     domainEvents,
@@ -294,7 +327,187 @@ const peerThreadOf = (store: PairRoomStore.PairRoomStore["Service"], roomId: Pai
       ),
     );
 
+const MESSAGE_AT = "1970-01-01T00:00:00.000Z";
+
+const turnStartWhere =
+  (predicate: (command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>) => boolean) =>
+  (command: OrchestrationCommand) =>
+    command.type === "thread.turn.start" && predicate(command);
+
+const asTurnStart = (command: OrchestrationCommand) =>
+  command as Extract<OrchestrationCommand, { type: "thread.turn.start" }>;
+
+/** The Lead's turn for the message sent at MESSAGE_AT has ended. */
+const leadTurnEnded = (state: "completed" | "interrupted") => ({
+  session: runningSession(LEAD, null),
+  latestTurn: {
+    turnId: LEAD_TURN,
+    state,
+    requestedAt: MESSAGE_AT,
+    startedAt: MESSAGE_AT,
+    completedAt: MESSAGE_AT,
+    assistantMessageId: null,
+  },
+});
+
 describe("PairCoordinator", () => {
+  it("recognizes an @-mention only as its own word", () => {
+    expect(PairCoordinator.pairMessageMentions("@Astra, is this safe?", "astra")).toBe(true);
+    expect(PairCoordinator.pairMessageMentions("what do you think @astra", "astra")).toBe(true);
+    expect(PairCoordinator.pairMessageMentions("mail me@astra.dev", "astra")).toBe(false);
+    expect(PairCoordinator.pairMessageMentions("ping @astra-bot", "astra")).toBe(false);
+    expect(PairCoordinator.pairMessageMentions("@Fable, is this safe?", "astra")).toBe(false);
+  });
+
+  it.effect(
+    "sends each roundtable message to the Peer and brings its answer to the Lead after the Lead's turn",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness();
+          const roomId = yield* harness.createRoom("roundtable");
+          yield* harness.sendUserMessage({
+            text: "Should retries use jitter?",
+            createdAt: MESSAGE_AT,
+          });
+
+          const relay = asTurnStart(
+            yield* harness.commandWhere(
+              turnStartWhere(
+                (command) => readPairRoomNote(command.message.context)?.purpose === "user-relay",
+              ),
+            ),
+          );
+          const peerThreadId = yield* peerThreadOf(harness.store, roomId);
+          expect(relay.threadId).toBe(peerThreadId);
+          expect(relay.message.text).toContain("Pair Room roundtable");
+          expect(relay.message.text).toContain("The user's message:\n\nShould retries use jitter?");
+
+          yield* harness.finishTurn({
+            threadId: peerThreadId,
+            state: "completed",
+            answer: "Yes, full jitter, capped at 30 seconds.",
+          });
+          // A second message lands after the Peer's event is fully handled, so it marks that point.
+          yield* harness.sendUserMessage({ text: "@Astra and the cap?", createdAt: MESSAGE_AT });
+          const both = yield* harness.roomWhere((room) => room.consults.length === 2);
+          expect(both.consults.map((entry) => [entry.kind, entry.status])).toEqual([
+            ["roundtable", "answered"],
+            ["question", "running"],
+          ]);
+          const leadTurns = (yield* harness.recorded("thread.turn.start")).filter(
+            (command) => command.threadId === LEAD,
+          );
+          expect(leadTurns).toEqual([]);
+
+          yield* harness.setShell(LEAD, leadTurnEnded("completed"));
+          yield* PubSub.publish(harness.domainEvents, threadEvent("thread.session-set", LEAD));
+          const answerTurn = asTurnStart(
+            yield* harness.commandWhere(turnStartWhere((command) => command.threadId === LEAD)),
+          );
+          expect(answerTurn.message.text).toContain(
+            "Astra (Peer) answered the user's last message independently",
+          );
+          expect(answerTurn.message.text).toContain("Yes, full jitter, capped at 30 seconds.");
+          expect(readPairRoomNote(answerTurn.message.context)).toEqual({
+            purpose: "peer-answer",
+            from: "astra",
+            to: "fable",
+          });
+          yield* harness.roomWhere((room) => room.consults[0]?.answerDeliveredAt !== null);
+        }),
+      ),
+  );
+
+  it.effect(
+    "sends an @-mention to the Peer in adaptive mode and brings nothing back when the Peer fails",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness();
+          const roomId = yield* harness.createRoom();
+          // A turn the room starts itself is never relayed, even when its text names the Peer.
+          yield* harness.sendUserMessage({
+            text: "Handoff notes for @astra",
+            createdAt: MESSAGE_AT,
+            context: pairRoomNoteContext("note-1", {
+              purpose: "handoff",
+              from: "fable",
+              to: "astra",
+            }),
+          });
+          yield* harness.sendUserMessage({ text: "What would astra say?", createdAt: MESSAGE_AT });
+          yield* harness.sendUserMessage({
+            text: "@astra is retrying a 401 safe?",
+            createdAt: MESSAGE_AT,
+          });
+          const room = yield* harness.roomWhere((candidate) => candidate.consults.length > 0);
+          expect(room.consults).toMatchObject([
+            {
+              title: "@astra is retrying a 401 safe?",
+              kind: "question",
+              automatic: true,
+              answerTo: "lead-turn",
+            },
+          ]);
+          const relay = asTurnStart(
+            yield* harness.commandWhere(
+              turnStartWhere(
+                (command) => readPairRoomNote(command.message.context)?.purpose === "user-relay",
+              ),
+            ),
+          );
+          expect(relay.message.text).toContain("the user addressed you directly");
+
+          const peerThreadId = yield* peerThreadOf(harness.store, roomId);
+          yield* harness.finishTurn({ threadId: peerThreadId, state: "error" });
+          yield* harness.setShell(LEAD, leadTurnEnded("completed"));
+          yield* PubSub.publish(harness.domainEvents, threadEvent("thread.session-set", LEAD));
+          yield* harness.roomWhere(
+            (candidate) => candidate.consults[0]?.answerDeliveredAt !== null,
+          );
+          const leadTurns = (yield* harness.recorded("thread.turn.start")).filter(
+            (command) => command.threadId === LEAD,
+          );
+          expect(leadTurns).toEqual([]);
+        }),
+      ),
+  );
+
+  it.effect(
+    "tells the user when the Peer is still busy instead of dropping the message silently",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness();
+          yield* harness.createRoom("roundtable");
+          yield* harness.coordinator.consult(LEAD, {
+            kind: "roundtable",
+            question: "Jitter or not?",
+            leadProposal: "Full jitter.",
+            waitSeconds: 0,
+          });
+          yield* harness.sendUserMessage({ text: "Also check the cap.", createdAt: MESSAGE_AT });
+          const skipped = yield* harness.commandWhere(
+            (command) =>
+              command.type === "thread.activity.append" &&
+              (command.activity.payload as { status?: string }).status === "failed",
+          );
+          expect(skipped).toMatchObject({
+            threadId: LEAD,
+            activity: {
+              kind: "task.completed",
+              payload: { title: "Astra: Also check the cap." },
+            },
+          });
+          expect(
+            (skipped as Extract<OrchestrationCommand, { type: "thread.activity.append" }>).activity
+              .payload,
+          ).toMatchObject({ summary: expect.stringContaining("only Fable got this message") });
+        }),
+      ),
+  );
+
   it.effect("consults Astra in a review worktree and returns its answer through pair_wait", () =>
     Effect.scoped(
       Effect.gen(function* () {

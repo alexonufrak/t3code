@@ -20,6 +20,7 @@ import {
   type PairAssignmentReport,
   type PairAssignmentState,
   type PairConsult,
+  type PairConsultAnswerTo,
   type PairConsultKind,
   type PairDecision,
   type PairDecisionCategory,
@@ -112,7 +113,16 @@ export type PairRoomCommand =
       readonly kind: PairConsultKind;
       readonly leadTurnId: TurnId | null;
       readonly automatic: boolean;
+      /** Defaults to "tool". */
+      readonly answerTo?: PairConsultAnswerTo;
       readonly title: string;
+      readonly at: string;
+    }
+  | {
+      /** A "lead-turn" answer reached the Lead, or will never need to. */
+      readonly type: "consult.answer-delivered";
+      readonly roomId: PairRoomId;
+      readonly consultId: string;
       readonly at: string;
     }
   | {
@@ -489,10 +499,16 @@ const keepNewestSettled = <T>(
   return keptNewestFirst.toReversed();
 };
 
+/** An answer still owed to the Lead keeps its consult, whatever its age. */
+export const pairConsultAnswerOwed = (consult: PairConsult) =>
+  consult.answerTo === "lead-turn" &&
+  consult.status !== "running" &&
+  consult.answerDeliveredAt === null;
+
 const trimSettledConsults = (consults: ReadonlyArray<PairConsult>) =>
   keepNewestSettled(
     consults,
-    (consult) => consult.status !== "running",
+    (consult) => consult.status !== "running" && !pairConsultAnswerOwed(consult),
     PAIR_ROOM_SETTLED_CONSULTS_KEPT,
   );
 
@@ -672,6 +688,8 @@ export function decidePairRoom(
             leadTurnId: command.leadTurnId,
             round: used + 1,
             automatic: command.automatic,
+            answerTo: command.answerTo ?? "tool",
+            answerDeliveredAt: null,
             status: "running",
             peerTurnId: null,
             title: clampTitle(command.title),
@@ -680,6 +698,20 @@ export function decidePairRoom(
             settledAt: null,
           },
         ]),
+      });
+    }
+
+    case "consult.answer-delivered": {
+      const consult = room.consults.find((candidate) => candidate.consultId === command.consultId);
+      if (!consult) return reject("not-found", `Consult ${command.consultId} was not found.`);
+      // Once only, and never before the Peer has finished.
+      if (!pairConsultAnswerOwed(consult)) return accept(room);
+      return accept({
+        ...room,
+        ...touched,
+        consults: trimSettledConsults(
+          replaceById(room.consults, "consultId", { ...consult, answerDeliveredAt: command.at }),
+        ),
       });
     }
 

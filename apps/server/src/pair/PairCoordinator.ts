@@ -32,7 +32,7 @@ import {
   pairMirrorProgressPayload,
   pairMirrorStartedPayload,
 } from "@t3tools/shared/pairMirror";
-import { pairRoomNoteContext } from "@t3tools/shared/pairRoomNote";
+import { pairRoomNoteContext, readPairRoomNote } from "@t3tools/shared/pairRoomNote";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -52,6 +52,7 @@ import {
   consultPrompt,
   handoffRequest,
   leadHandoff,
+  peerAnswerPrompt,
   resumeRequest,
   revisionRequest,
   roleGuidance,
@@ -71,10 +72,14 @@ import {
 import { PairWorkspace, type PairWorkspaceError } from "./PairWorkspace.ts";
 import {
   clampPairText,
+  pairConsultAnswerOwed,
   pairRoundLimit,
   pairRoundsUsed,
   pairScopeDeviations,
 } from "./pairRoomDecider.ts";
+
+/** A Peer answer brought back to the Lead is cut at this length; the Peer's thread keeps all of it. */
+const PAIR_PEER_ANSWER_MAX_LENGTH = 40_000;
 
 /** A consult the Peer has not answered in this long is failed the next time anyone looks at it. */
 export const PAIR_CONSULT_DEADLINE = Duration.minutes(20);
@@ -273,6 +278,14 @@ export const pairDecisionView = (decision: PairDecision): PairDecisionView => ({
 });
 
 const titleFrom = (text: string) => clampPairText(text.split("\n")[0] ?? text, 120);
+
+/** "@Astra" as its own word, in any case. "me@astra.dev" and "@astra-bot" do not count. */
+export const pairMessageMentions = (text: string, persona: PairPersona) =>
+  new RegExp(`(?<![\\w@.])@${PAIR_PERSONAS[persona].displayName}(?![\\w-])`, "i").test(text);
+
+/** What a consult card calls the request: the user's own message, or the Lead's consult. */
+const consultNoun = (consult: PairConsult) =>
+  consult.answerTo === "lead-turn" ? "your message" : "a consult";
 
 const emptyHandleResult = {
   handle: null,
@@ -569,7 +582,7 @@ export const make = Effect.gen(function* () {
       // The card updates before the room does, so a Lead reading the answer never sees a stale card.
       yield* mirror(room, {
         kind: "task.completed",
-        summary: `${personaName(peer)} ${outcome.status === "answered" ? "answered" : outcome.status} a consult`,
+        summary: `${personaName(peer)} ${outcome.status === "answered" ? "answered" : outcome.status} ${consultNoun(consult)}`,
         payload: pairMirrorCompletedPayload(consultCard(consult, peer), mirrorOutcome),
         turnId: consult.leadTurnId,
       });
@@ -656,7 +669,7 @@ export const make = Effect.gen(function* () {
       const peer = yield* ensurePeer(room, lead);
       yield* mirror(peer.room, {
         kind: "task.started",
-        summary: `${personaName(peerPersona)} is answering a consult`,
+        summary: `${personaName(peerPersona)} is answering ${consultNoun(consult)}`,
         payload: pairMirrorStartedPayload(consultCard(consult, peerPersona), request.question),
         turnId: consult.leadTurnId,
       });
@@ -669,14 +682,18 @@ export const make = Effect.gen(function* () {
           lead: lead.persona,
           peer: peerPersona,
           kind: consult.kind,
+          source: consult.answerTo === "lead-turn" ? "user" : consult.automatic ? "review" : "lead",
           round: consult.round,
           roundLimit: consult.automatic ? null : pairRoundLimit(room, consult.leadTurnId),
-          automatic: consult.automatic,
           snapshotCommit: peer.snapshotCommit,
           question: request.question,
           focusPaths: request.focusPaths,
         }),
-        note: { purpose: "consult", from: lead.persona, to: peerPersona },
+        note: {
+          purpose: consult.answerTo === "lead-turn" ? "user-relay" : "consult",
+          from: lead.persona,
+          to: peerPersona,
+        },
         createdAt: consult.requestedAt,
       });
     }).pipe(
@@ -904,7 +921,17 @@ export const make = Effect.gen(function* () {
         if (!consultNow) {
           return yield* rejected("not-found", `Consult ${handle} is too old to read back.`);
         }
-        return yield* consultResult(room, consultNow);
+        const result = yield* consultResult(room, consultNow);
+        if (result.status === "answered" && pairConsultAnswerOwed(consultNow)) {
+          // The Lead read the answer here, so it needs no turn to bring it.
+          yield* apply({
+            type: "consult.answer-delivered",
+            roomId: room.roomId,
+            consultId: handle,
+            at: yield* nowIso,
+          });
+        }
+        return result;
       }
       if (callerRoom.assignments.some((entry) => entry.assignmentId === handle)) {
         const settled = yield* waitForRoom(
@@ -1776,6 +1803,133 @@ export const make = Effect.gen(function* () {
       if (Option.isSome(outcome)) yield* settleConsult(room, running, outcome.value);
     });
 
+  /**
+   * Sends a user message on the Lead's thread to the Peer as well: every
+   * message in roundtable mode, and any message that @-mentions the Peer.
+   * The server does it rather than the Lead, so it happens every time.
+   */
+  const relayUserMessage = (
+    room: PairRoom,
+    event: Extract<OrchestrationEvent, { type: "thread.turn-start-requested" }>,
+  ) =>
+    Effect.gen(function* () {
+      const lead = pairRoomParticipant(room, "lead");
+      const peer = pairRoomParticipant(room, "peer");
+      if (!lead || !peer || lead.threadId !== event.payload.threadId) return;
+      if (room.status !== "active" || room.leadSwitch) return;
+      const detail = yield* snapshots
+        .getThreadDetailById(lead.threadId)
+        .pipe(Effect.mapError(internal("read user message")));
+      const message = Option.getOrUndefined(detail)?.messages.find(
+        (entry) => entry.id === event.payload.messageId,
+      );
+      // Turns the room starts itself (answers, handoffs) carry a note and are never relayed.
+      if (message?.role !== "user" || readPairRoomNote(message.context) !== null) return;
+      const mentioned = pairMessageMentions(message.text, peer.persona);
+      if (!mentioned && room.mode !== "roundtable") return;
+      const leadNow = yield* leadContext(room);
+      const title = titleFrom(message.text);
+      if (room.consults.some((consult) => consult.status === "running")) {
+        const card: PairMirrorCard = {
+          taskId: `relay-skipped-${yield* uuid}`,
+          title: `${personaName(peer.persona)}: ${title}`,
+          persona: personaName(peer.persona),
+          model: PAIR_PERSONAS[peer.persona].model,
+        };
+        yield* mirror(room, {
+          kind: "task.started",
+          summary: `${personaName(peer.persona)} is still busy`,
+          payload: pairMirrorStartedPayload(card, message.text),
+          turnId: null,
+        });
+        yield* mirror(room, {
+          kind: "task.completed",
+          summary: `${personaName(peer.persona)} is still busy`,
+          payload: pairMirrorCompletedPayload(card, {
+            status: "failed",
+            error: `${personaName(peer.persona)} was still answering an earlier request, so only ${personaName(lead.persona)} got this message.`,
+          }),
+          turnId: null,
+        });
+        return;
+      }
+      const consultId = `consult-${yield* uuid}`;
+      const recorded = yield* apply({
+        type: "consult.request",
+        roomId: room.roomId,
+        consultId,
+        kind: mentioned ? "question" : "roundtable",
+        leadTurnId: null,
+        automatic: true,
+        answerTo: "lead-turn",
+        title,
+        // The Lead turn for this message was requested at this instant, which is how delivery finds it.
+        at: event.payload.createdAt,
+      });
+      yield* launchConsult(
+        recorded,
+        recorded.consults.find((entry) => entry.consultId === consultId)!,
+        leadNow,
+        { question: message.text, focusPaths: [] },
+      );
+    });
+
+  /**
+   * Starts a Lead turn with the Peer's answer to a relayed user message once
+   * the Lead's own turn for that message has ended. An answer that can no
+   * longer help (the Peer failed, the user stopped the Lead, the room closed
+   * or is changing Lead) is marked delivered, and its card is all that shows.
+   */
+  const deliverPeerAnswer = (room: PairRoom) =>
+    Effect.gen(function* () {
+      const owed = room.consults.find(pairConsultAnswerOwed);
+      if (!owed) return;
+      const markDelivered = Effect.gen(function* () {
+        yield* apply({
+          type: "consult.answer-delivered",
+          roomId: room.roomId,
+          consultId: owed.consultId,
+          at: yield* nowIso,
+        });
+      });
+      const lead = pairRoomParticipant(room, "lead");
+      const peer = pairRoomParticipant(room, "peer");
+      const shell = lead?.threadId
+        ? Option.getOrUndefined(yield* threadShell(lead.threadId))
+        : undefined;
+      if (
+        !lead?.threadId ||
+        !peer ||
+        !shell ||
+        owed.status !== "answered" ||
+        room.status !== "active" ||
+        room.leadSwitch
+      ) {
+        return yield* markDelivered;
+      }
+      const turn = shell.latestTurn;
+      if (isRunningTurn(shell) || !turn || turn.requestedAt < owed.requestedAt) return;
+      if (turn.state === "interrupted") return yield* markDelivered;
+      const answer = yield* readAnswer(room, owed);
+      // Marked first: a failed start must not bring the same answer twice.
+      yield* markDelivered;
+      if (!answer) return;
+      yield* startTurn({
+        commandKey: `pair:${room.roomId}:peer-answer:${owed.consultId}`,
+        threadId: lead.threadId,
+        persona: lead.persona,
+        runtimeMode: shell.runtimeMode,
+        text: peerAnswerPrompt({
+          lead: lead.persona,
+          peer: peer.persona,
+          kind: owed.kind,
+          answer: clampPairText(answer, PAIR_PEER_ANSWER_MAX_LENGTH),
+        }),
+        note: { purpose: "peer-answer", from: peer.persona, to: lead.persona },
+        createdAt: yield* nowIso,
+      });
+    });
+
   const reviewGuardrail = (
     room: PairRoom,
     event: Extract<OrchestrationEvent, { type: "thread.turn-diff-completed" }>,
@@ -1971,6 +2125,10 @@ export const make = Effect.gen(function* () {
         yield* mirrorWaitingOnUser(found.value, threadId);
         return;
       }
+      if (event.type === "thread.turn-start-requested") {
+        yield* relayUserMessage(found.value, event);
+        return;
+      }
       yield* settleIfAnswered(found.value, threadId);
       yield* settleHandoffDraft(found.value, threadId);
       if (event.type === "thread.turn-diff-completed") {
@@ -1981,6 +2139,9 @@ export const make = Effect.gen(function* () {
       if (event.type === "thread.session-set" || event.type === "thread.turn-diff-completed") {
         const room = Option.getOrElse(yield* store.get(found.value.roomId), () => found.value);
         yield* flagUnsubmittedTurn(room, threadId);
+        yield* deliverPeerAnswer(
+          Option.getOrElse(yield* store.get(found.value.roomId), () => room),
+        );
       }
     }).pipe(
       Effect.catchCause((cause) =>
@@ -2042,6 +2203,7 @@ export const make = Effect.gen(function* () {
           })),
         );
       }
+      yield* deliverPeerAnswer(Option.getOrElse(yield* store.get(room.roomId), () => room));
       for (const assignment of room.assignments) {
         if (assignment.state !== "running") continue;
         const current = Option.getOrElse(yield* store.get(room.roomId), () => room);

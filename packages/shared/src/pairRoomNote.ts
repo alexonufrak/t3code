@@ -55,5 +55,9 @@ export function pairRoomNoteTitle(note: PairRoomNote): string {
       return `You asked ${from} to hand off to ${to}`;
     case "handoff":
       return `${from} handed off to ${to}`;
+    case "user-relay":
+      return `Your message, sent to ${to} too`;
+    case "peer-answer":
+      return `${from}'s answer, brought back to ${to}`;
   }
 }

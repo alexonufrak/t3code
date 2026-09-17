@@ -23,15 +23,18 @@ export const PAIR_ROOM_MODE_COPY: Readonly<
 > = {
   adaptive: {
     label: "Adaptive",
-    description: "The Lead asks the Peer when a second opinion would change the outcome.",
+    description:
+      "The Lead asks the Peer when a second opinion would change the outcome. @-mention the Peer to ask it yourself.",
   },
   pair: {
     label: "Pair",
-    description: "The Peer reviews every code change before the Lead's turn ends.",
+    description:
+      "The Peer reviews every code change, on its own if the Lead doesn't ask. @-mention the Peer to ask it yourself.",
   },
   roundtable: {
     label: "Roundtable",
-    description: "Both propose independently on design questions, then the Lead decides.",
+    description:
+      "Every message goes to both. The Peer answers on its own, then the Lead gives the final answer.",
   },
 };
 

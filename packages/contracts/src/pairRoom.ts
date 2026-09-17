@@ -93,6 +93,10 @@ export const PairRoomNotePurpose = Schema.Literals([
   "resume",
   "handoff-request",
   "handoff",
+  /** The user's own message, sent on to the Peer (roundtable mode or an @-mention). */
+  "user-relay",
+  /** The Peer's answer to a relayed user message, brought back to the Lead. */
+  "peer-answer",
 ]);
 export type PairRoomNotePurpose = typeof PairRoomNotePurpose.Type;
 
@@ -131,14 +135,27 @@ export type PairConsultKind = typeof PairConsultKind.Type;
 export const PairConsultStatus = Schema.Literals(["running", "answered", "failed", "cancelled"]);
 export type PairConsultStatus = typeof PairConsultStatus.Type;
 
+export const PairConsultAnswerTo = Schema.Literals(["tool", "lead-turn"]);
+export type PairConsultAnswerTo = typeof PairConsultAnswerTo.Type;
+
 export const PairConsult = Schema.Struct({
   consultId: TrimmedNonEmptyString,
   kind: PairConsultKind,
   /** The Lead turn the consult belongs to; rounds are counted per Lead turn. */
   leadTurnId: Schema.NullOr(TurnId),
   round: PositiveInt,
-  /** Started by the server (pair mode review guardrail) rather than the Lead. */
+  /** Started by the server (the pair mode review guardrail or a relayed user message) rather than the Lead. */
   automatic: Schema.Boolean,
+  /**
+   * How the Lead gets the answer. "tool": from pair_consult or pair_wait.
+   * "lead-turn": the consult relays a user message, and the server starts a
+   * Lead turn with the answer once the Lead's own turn has ended.
+   */
+  answerTo: PairConsultAnswerTo.pipe(Schema.withDecodingDefault(Effect.succeed("tool" as const))),
+  /** When a "lead-turn" answer reached the Lead, or was dropped because it no longer could. */
+  answerDeliveredAt: Schema.NullOr(IsoDateTime).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   status: PairConsultStatus,
   /** The Peer turn that answered; set when the consult settles. */
   peerTurnId: Schema.NullOr(TurnId),
