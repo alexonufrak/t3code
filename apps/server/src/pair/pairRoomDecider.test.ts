@@ -11,7 +11,9 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   decidePairRoom,
   findPairRoomByThread,
+  pairGlobMatches,
   pairScopeDeviations,
+  pairScopeGlobsProblem,
   pairScopesOverlap,
   type PairRoomCommand,
 } from "./pairRoomDecider.ts";
@@ -371,6 +373,32 @@ describe("pair scopes", () => {
         ["src/api", "docs/*.md"],
       ),
     ).toEqual(["src/web/app.tsx"]);
+  });
+
+  it("matches *, ** and ? the way shell globs do, leaving dotfiles to literal dots", () => {
+    expect(pairGlobMatches("a/b/c.ts", "**/*.ts")).toBe(true);
+    expect(pairGlobMatches("c.ts", "**/*.ts")).toBe(true);
+    expect(pairGlobMatches("src/api/v1.ts", "src/*/v?.ts")).toBe(true);
+    expect(pairGlobMatches("src/api/nested/v1.ts", "src/*/v?.ts")).toBe(false);
+    expect(pairGlobMatches("src/.env", "src/**")).toBe(false);
+    expect(pairGlobMatches("src/.env", "src/.*")).toBe(true);
+    expect(pairGlobMatches("src/abcabd", "src/*ab?")).toBe(true);
+  });
+
+  it("stays fast on patterns that stall a backtracking matcher", () => {
+    const name = "a".repeat(250);
+    expect(pairGlobMatches(`${name}/${name}`, `${"*a".repeat(60)}b/**/x`)).toBe(false);
+    expect(pairGlobMatches(`${name}/${name}`, `${"**/".repeat(60)}b`)).toBe(false);
+  });
+
+  it("refuses scope syntax the matcher does not support, and oversized scopes", () => {
+    expect(pairScopeGlobsProblem(["src/**"])).toBeNull();
+    expect(pairScopeGlobsProblem(["{a,b}".repeat(14)])).toContain("uses {}, (), [] or !");
+    expect(pairScopeGlobsProblem([])).toContain("at least one");
+    expect(pairScopeGlobsProblem(Array.from({ length: 21 }, (_, i) => `src/${i}`))).toContain(
+      "at most 20",
+    );
+    expect(rejectionOf(createRoom(), assign("braces", ["src/{a,b}/**"])).reason).toBe("invalid");
   });
 });
 

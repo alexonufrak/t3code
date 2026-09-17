@@ -29,7 +29,6 @@ import {
   type ThreadId,
   type TurnId,
 } from "@t3tools/contracts";
-import * as NodePath from "node:path";
 
 /**
  * Pure Pair Room rules. Every change to a room goes through `decidePairRoom`,
@@ -256,12 +255,93 @@ export const pairScopesOverlap = (
     }),
   );
 
+export const PAIR_SCOPE_GLOBS_MAX = 20;
+export const PAIR_SCOPE_GLOB_MAX_LENGTH = 200;
+const UNSUPPORTED_GLOB_SYNTAX = /[{}()[\]!]/;
+
+/**
+ * Why a set of scope globs is refused, or null. Scopes come from agents, so
+ * only `*`, `**` and `?` are supported: the matcher below stays linear in the
+ * glob and path lengths, where brace or extglob syntax lets a short pattern
+ * stall a backtracking matcher for minutes.
+ */
+export const pairScopeGlobsProblem = (globs: ReadonlyArray<string>): string | null => {
+  if (globs.length === 0) return "An assignment needs at least one scope glob.";
+  if (globs.length > PAIR_SCOPE_GLOBS_MAX) {
+    return `An assignment takes at most ${PAIR_SCOPE_GLOBS_MAX} scope globs.`;
+  }
+  for (const glob of globs) {
+    if (glob.length > PAIR_SCOPE_GLOB_MAX_LENGTH) {
+      return `Scope globs are at most ${PAIR_SCOPE_GLOB_MAX_LENGTH} characters.`;
+    }
+    if (UNSUPPORTED_GLOB_SYNTAX.test(glob)) {
+      return `Scope glob "${glob}" uses {}, (), [] or !. Scopes support *, ** and ?; list alternatives as separate globs.`;
+    }
+  }
+  return null;
+};
+
+/** One path segment against literals, `*` and `?`, in O(pattern x segment) with one backtrack point. */
+const segmentMatches = (pattern: string, segment: string): boolean => {
+  // As in shell globs, a leading dot is only matched by a literal dot.
+  if (segment.startsWith(".") && !pattern.startsWith(".")) return false;
+  let p = 0;
+  let s = 0;
+  let star = -1;
+  let resume = 0;
+  while (s < segment.length) {
+    if (p < pattern.length && (pattern[p] === "?" || pattern[p] === segment[s])) {
+      p += 1;
+      s += 1;
+    } else if (p < pattern.length && pattern[p] === "*") {
+      star = p;
+      p += 1;
+      resume = s;
+    } else if (star !== -1) {
+      p = star + 1;
+      resume += 1;
+      s = resume;
+    } else {
+      return false;
+    }
+  }
+  while (pattern[p] === "*") p += 1;
+  return p === pattern.length;
+};
+
+/** `**` spans any number of segments (never a dot segment); each pair of segments is compared once. */
+export const pairGlobMatches = (file: string, glob: string): boolean => {
+  const fileSegments = file.split("/");
+  const globSegments = glob.split("/");
+  const width = fileSegments.length + 1;
+  const memo = new Map<number, boolean>();
+  const visit = (g: number, f: number): boolean => {
+    const key = g * width + f;
+    const cached = memo.get(key);
+    if (cached !== undefined) return cached;
+    const globSegment = globSegments[g];
+    const fileSegment = fileSegments[f];
+    const result =
+      globSegment === undefined
+        ? fileSegment === undefined
+        : globSegment === "**"
+          ? visit(g + 1, f) ||
+            (fileSegment !== undefined && !fileSegment.startsWith(".") && visit(g, f + 1))
+          : fileSegment !== undefined &&
+            segmentMatches(globSegment, fileSegment) &&
+            visit(g + 1, f + 1);
+    memo.set(key, result);
+    return result;
+  };
+  return visit(0, 0);
+};
+
 export const pairScopeMatches = (file: string, scopeGlobs: ReadonlyArray<string>): boolean => {
   const normalizedFile = normalizeScopePath(file);
   return scopeGlobs.some((glob) => {
     const normalizedGlob = normalizeScopePath(glob);
     return (
-      NodePath.posix.matchesGlob(normalizedFile, normalizedGlob) ||
+      pairGlobMatches(normalizedFile, normalizedGlob) ||
       // A bare directory scope such as `src/api` covers everything under it.
       (!GLOB_SEGMENT.test(normalizedGlob) && normalizedFile.startsWith(`${normalizedGlob}/`))
     );
@@ -550,9 +630,8 @@ export function decidePairRoom(
     case "assignment.create": {
       const blocked = requireWritable(room);
       if (blocked) return { ok: false, rejection: blocked };
-      if (command.scopeGlobs.length === 0) {
-        return reject("invalid", "An assignment needs at least one scope glob.");
-      }
+      const scopeProblem = pairScopeGlobsProblem(command.scopeGlobs);
+      if (scopeProblem) return reject("invalid", scopeProblem);
       if (room.assignments.some((existing) => existing.assignmentId === command.assignmentId)) {
         return reject("conflict", `Assignment ${command.assignmentId} already exists.`);
       }
@@ -608,9 +687,8 @@ export function decidePairRoom(
       }
       const scopeGlobs = command.scopeGlobs?.map(normalizeScopePath) ?? assignment.scopeGlobs;
       if (command.scopeGlobs) {
-        if (scopeGlobs.length === 0) {
-          return reject("invalid", "An assignment needs at least one scope glob.");
-        }
+        const scopeProblem = pairScopeGlobsProblem(scopeGlobs);
+        if (scopeProblem) return reject("invalid", scopeProblem);
         const overlapping = room.assignments.find(
           (existing) =>
             existing.assignmentId !== assignment.assignmentId &&

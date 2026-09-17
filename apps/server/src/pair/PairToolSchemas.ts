@@ -182,7 +182,7 @@ export const PairAssignInput = Schema.Struct({
   }),
   scopeGlobs: ShortList(TrimmedNonEmptyString).check(Schema.isMinLength(1)).annotate({
     description:
-      "Repository-relative globs the assignee may change, e.g. apps/server/src/auth/**. Must not overlap another active assignment.",
+      "Repository-relative globs the assignee may change, e.g. apps/server/src/auth/**. Supports *, ** and ? only (no braces or brackets); list alternatives as separate globs. Must not overlap another active assignment.",
   }),
   acceptanceCriteria: ShortList(Text),
   expectedArtifact: Schema.optional(PairAssignmentArtifact).annotate({
