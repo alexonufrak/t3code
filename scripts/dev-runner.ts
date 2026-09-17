@@ -21,6 +21,7 @@ import { ChildProcess } from "effect/unstable/process";
 
 import { type DevShareError, shareDevServer, unshareDevServer } from "./lib/dev-share.ts";
 import { loadRepoEnv } from "./lib/public-config.ts";
+import { DESKTOP_FORK_IDENTITY } from "@t3tools/shared/desktopForkIdentity";
 
 Object.assign(process.env, loadRepoEnv());
 
@@ -68,7 +69,7 @@ export function isProxiableBindHost(host: string): boolean {
 }
 
 export const DEFAULT_T3_HOME = Effect.map(Effect.service(Path.Path), (path) =>
-  path.join(NodeOS.homedir(), ".t3"),
+  path.join(NodeOS.homedir(), DESKTOP_FORK_IDENTITY.homeDirName),
 );
 
 const MODE_ARGS = {

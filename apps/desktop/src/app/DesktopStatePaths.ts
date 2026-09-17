@@ -1,3 +1,4 @@
+import { DESKTOP_FORK_IDENTITY } from "@t3tools/shared/desktopForkIdentity";
 import * as Option from "effect/Option";
 
 export type JoinPath = (first: string, ...segments: string[]) => string;
@@ -16,7 +17,7 @@ export function resolveDesktopBaseDir(input: {
   readonly t3Home: Option.Option<string>;
 }): string {
   return Option.getOrElse(normalizeConfiguredBaseDir(input.t3Home), () =>
-    input.joinPath(input.homeDirectory, ".t3"),
+    input.joinPath(input.homeDirectory, DESKTOP_FORK_IDENTITY.homeDirName),
   );
 }
 

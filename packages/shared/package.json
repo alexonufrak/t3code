@@ -319,6 +319,10 @@
       "types": "./src/desktopAppControl.ts",
       "import": "./src/desktopAppControl.ts"
     },
+    "./desktopForkIdentity": {
+      "types": "./src/desktopForkIdentity.ts",
+      "import": "./src/desktopForkIdentity.ts"
+    },
     "./thirdPartyLicenses": {
       "types": "./src/thirdPartyLicenses.ts",
       "import": "./src/thirdPartyLicenses.ts"
