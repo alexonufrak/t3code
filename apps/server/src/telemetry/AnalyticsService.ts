@@ -87,7 +87,9 @@ export const make = Effect.gen(function* () {
   const telemetryConfig = yield* TelemetryEnvConfig;
   const httpClient = yield* HttpClient.HttpClient;
   const serverConfig = yield* ServerConfig.ServerConfig;
-  const identifier = yield* getTelemetryIdentifier;
+  // Identity comes from the Codex and Claude CLI account files; with telemetry
+  // off there is nothing to send, so don't read them at all.
+  const identifier = telemetryConfig.enabled ? yield* getTelemetryIdentifier : undefined;
   const bufferRef = yield* Ref.make<ReadonlyArray<BufferedAnalyticsEvent>>([]);
   const clientType = serverConfig.mode === "desktop" ? "desktop-app" : "cli-web-client";
   const hostPlatform = yield* HostProcessPlatform;
