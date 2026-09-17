@@ -84,6 +84,7 @@ import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
+import { PAIR_ROOM_INSTRUCTIONS } from "../../pair/PairInstructions.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 const isModelSelection = Schema.is(ModelSelection);
@@ -907,6 +908,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     threadId: ThreadId,
   ) {
     const capabilities = new Set<McpInvocationContext.McpCapability>(["pull-requests"]);
+    // Pair Room Phase 0 spike: T3CODE_PAIR_SPIKE=1 gives every thread the pair
+    // tools. Phase 1 grants "pair" only to threads that belong to a room.
+    if (process.env.T3CODE_PAIR_SPIKE === "1") capabilities.add("pair");
     const access = yield* agentAccessSettings(threadId);
     if (access.browser) capabilities.add("preview");
     if (access.device) capabilities.add("device");
@@ -952,6 +956,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           McpProviderSession.setMcpProviderSession({
             ...credential.config,
             ...(deviceEnvironment ? { agentDeviceEnvironment: deviceEnvironment } : {}),
+            ...(capabilities.has("pair") ? { instructions: PAIR_ROOM_INSTRUCTIONS } : {}),
           }),
         );
       }

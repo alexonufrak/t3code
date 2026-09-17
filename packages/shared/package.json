@@ -15,6 +15,10 @@
       "types": "./src/composerPullRequestMatches.ts",
       "import": "./src/composerPullRequestMatches.ts"
     },
+    "./pairMirror": {
+      "types": "./src/pairMirror.ts",
+      "import": "./src/pairMirror.ts"
+    },
     "./themePalettes": {
       "types": "./src/themePalettes.ts",
       "import": "./src/themePalettes.ts"

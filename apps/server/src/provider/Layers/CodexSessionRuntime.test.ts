@@ -22,6 +22,7 @@ import {
   rollbackCodexThread,
   toMcpElicitationResponse,
 } from "./CodexSessionRuntime.ts";
+import { PAIR_ROOM_INSTRUCTIONS } from "../../pair/PairInstructions.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
 describe("Codex thread history", () => {
@@ -196,6 +197,32 @@ describe("buildTurnStartParams", () => {
     NodeAssert.doesNotMatch(error.message, new RegExp(secret));
     NodeAssert.doesNotMatch(JSON.stringify(directDiagnostics), new RegExp(secret));
   });
+
+  it.effect("appends Pair Room instructions to the turn's developer instructions", () =>
+    Effect.gen(function* () {
+      const params = yield* buildTurnStartParams({
+        threadId: "provider-thread-1",
+        runtimeMode: "full-access",
+        prompt: "Review the retry policy",
+        model: "gpt-6-astra",
+        effort: "medium",
+        interactionMode: "default",
+        extraInstructions: PAIR_ROOM_INSTRUCTIONS,
+      });
+      const developerInstructions = params.collaborationMode?.settings.developer_instructions;
+
+      NodeAssert.equal(
+        developerInstructions,
+        buildCodexDeveloperInstructions(
+          "default",
+          { model: "gpt-6-astra", reasoningEffort: "medium" },
+          true,
+          PAIR_ROOM_INSTRUCTIONS,
+        ),
+      );
+      NodeAssert.ok(developerInstructions?.endsWith(PAIR_ROOM_INSTRUCTIONS));
+    }),
+  );
 
   it("includes plan collaboration mode when requested", () => {
     const params = Effect.runSync(

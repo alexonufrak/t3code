@@ -15,6 +15,8 @@ export interface McpProviderSessionConfig {
    * already pointed at the server's daemon; the agent never handles a token.
    */
   readonly agentDeviceEnvironment?: Readonly<Record<string, string>>;
+  /** Extra agent instructions for this thread, appended to the harness prompt (pair rooms). */
+  readonly instructions?: string;
 }
 
 /** Provider env with the device variables applied over `base`, or `base` untouched. */

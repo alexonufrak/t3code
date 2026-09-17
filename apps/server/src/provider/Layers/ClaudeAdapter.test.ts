@@ -15,6 +15,7 @@ import type {
 import {
   ApprovalRequestId,
   ClaudeSettings,
+  EnvironmentId,
   ProviderDriverKind,
   ProviderItemId,
   ProviderRuntimeEvent,
@@ -38,6 +39,8 @@ import * as TestClock from "effect/testing/TestClock";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import { PAIR_ROOM_INSTRUCTIONS } from "../../pair/PairInstructions.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   SYNTHETIC_CLAUDE_CAPABLE_MODEL,
@@ -460,6 +463,41 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect(
+    "appends Pair Room instructions from the thread's MCP session to the system prompt",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        McpProviderSession.setMcpProviderSession({
+          environmentId: EnvironmentId.make("environment-1"),
+          threadId: THREAD_ID,
+          providerSessionId: "provider-session-1",
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          endpoint: "http://127.0.0.1:1/mcp",
+          authorizationHeader: "Bearer test-token",
+          capabilities: new Set(["pair"]),
+          instructions: PAIR_ROOM_INSTRUCTIONS,
+        });
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+
+        assert.deepEqual(harness.getLastCreateQueryInput()?.options.systemPrompt, {
+          type: "preset",
+          preset: "claude_code",
+          append: `${buildRuntimeInstructions({ harness: "Claude Code" })}\n\n${PAIR_ROOM_INSTRUCTIONS}`,
+        });
+      }).pipe(
+        Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(THREAD_ID))),
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
 
   it.effect("derives auto permission mode from auto runtime policy without skip flag", () => {
     const harness = makeHarness();
