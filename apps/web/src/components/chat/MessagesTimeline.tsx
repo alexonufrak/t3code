@@ -78,6 +78,7 @@ import {
   type MaintainScrollAtEndOptions,
 } from "@legendapp/list/react";
 import { FileDiff } from "@pierre/diffs/react";
+import { Link } from "@tanstack/react-router";
 import { DiffWorkerPoolProvider } from "../DiffWorkerPoolProvider";
 import {
   createMessageAttachmentPreviewProjector,
@@ -1900,6 +1901,18 @@ function PairRoomNoteTimelineRow({
           {expanded ? "Hide message" : "Show message"}
           <Icon aria-hidden="true" className="size-3.5" />
         </button>
+        {note.purpose === "handoff" && note.fromThreadId ? (
+          <Link
+            to="/$environmentId/$threadId"
+            params={{
+              environmentId: ctx.activeThreadEnvironmentId,
+              threadId: note.fromThreadId,
+            }}
+            className="shrink-0 rounded-md px-1 underline-offset-2 transition-colors hover:text-foreground hover:underline focus-visible:underline focus-visible:outline-none"
+          >
+            Open earlier thread
+          </Link>
+        ) : null}
         <TimelineRowTimestamp
           createdAt={row.message.createdAt}
           timestampFormat={ctx.timestampFormat}

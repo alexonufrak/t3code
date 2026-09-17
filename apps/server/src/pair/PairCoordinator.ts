@@ -1683,7 +1683,12 @@ export const make = Effect.gen(function* () {
                 branch: lead.shell.branch,
               },
             }),
-            note: { purpose: "handoff", from: lead.persona, to: toPersona },
+            note: {
+              purpose: "handoff",
+              from: lead.persona,
+              to: toPersona,
+              fromThreadId: lead.threadId,
+            },
             createdAt: at,
           });
           return { roomId: room.roomId, threadId: newLeadThreadId };

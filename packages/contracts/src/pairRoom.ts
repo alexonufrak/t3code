@@ -91,6 +91,8 @@ export const PairRoomNote = Schema.Struct({
   purpose: PairRoomNotePurpose,
   from: PairPersona,
   to: PairPersona,
+  /** On a handoff, the previous Lead's thread, so the new thread can link back to it. */
+  fromThreadId: Schema.optionalKey(ThreadId),
 });
 export type PairRoomNote = typeof PairRoomNote.Type;
 

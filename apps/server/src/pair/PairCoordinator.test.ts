@@ -689,6 +689,7 @@ describe("PairCoordinator", () => {
           purpose: "handoff",
           from: "fable",
           to: "astra",
+          fromThreadId: LEAD,
         });
       }),
     ),
