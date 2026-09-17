@@ -298,6 +298,46 @@ describe("decidePairRoom", () => {
     ).toBe("invalid");
   });
 
+  it("caps assignments running at once and open decisions per room", () => {
+    const rooms = createRoom();
+    for (const index of [1, 2, 3, 4]) apply(rooms, assign(`a${index}`, [`src/${index}/**`]));
+    expect(rejectionOf(rooms, assign("a5", ["src/5/**"])).reason).toBe("conflict");
+
+    const lead = { persona: "fable", role: "lead" } as const;
+    for (let index = 0; index < 20; index += 1) {
+      apply(rooms, {
+        type: "decision.record",
+        roomId: ROOM_ID,
+        decisionId: `d${index}`,
+        actor: lead,
+        kind: "decision",
+        category: "product",
+        title: `Call ${index}`,
+        position: { summary: "Either way", evidence: null },
+        leadRecommendation: null,
+        consequenceOfDeferring: null,
+        resolution: null,
+        at: AT,
+      });
+    }
+    expect(
+      rejectionOf(rooms, {
+        type: "decision.record",
+        roomId: ROOM_ID,
+        decisionId: "d20",
+        actor: lead,
+        kind: "decision",
+        category: "product",
+        title: "One too many",
+        position: { summary: "Either way", evidence: null },
+        leadRecommendation: null,
+        consequenceOfDeferring: null,
+        resolution: null,
+        at: AT,
+      }).reason,
+    ).toBe("conflict");
+  });
+
   it("keeps agents from reopening work the user stopped, or moving work in a paused room", () => {
     const rooms = createRoom();
     apply(rooms, assign("a1", ["src/**"]));

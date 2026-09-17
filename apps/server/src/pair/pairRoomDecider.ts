@@ -1,10 +1,15 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import {
   PAIR_ASSIGNMENT_ACTIVE_STATES,
+  PAIR_ROOM_ACTIVE_ASSIGNMENTS_MAX,
+  PAIR_ROOM_CHANGED_FILES_KEPT,
   PAIR_ROOM_DEFAULT_MAX_ROUNDS,
   PAIR_ROOM_FORMER_PARTICIPANTS_KEPT,
   PAIR_ROOM_HANDOFF_MAX_LENGTH,
+  PAIR_ROOM_OPEN_DECISIONS_MAX,
+  PAIR_ROOM_SETTLED_ASSIGNMENTS_KEPT,
   PAIR_ROOM_SETTLED_CONSULTS_KEPT,
+  PAIR_ROOM_SETTLED_DECISIONS_KEPT,
   PAIR_ROOM_TEXT_MAX_LENGTH,
   PAIR_ROOM_TITLE_MAX_LENGTH,
   otherPairPersona,
@@ -464,15 +469,58 @@ const requireWritable = (room: PairRoom): PairRejection | null => {
 const replaceById = <T, K extends keyof T>(items: ReadonlyArray<T>, key: K, next: T) =>
   items.map((item) => (item[key] === next[key] ? next : item));
 
-const trimSettledConsults = (consults: ReadonlyArray<PairConsult>): ReadonlyArray<PairConsult> => {
+/**
+ * Every room change rewrites the whole record and re-sends it to every client,
+ * so finished items beyond a small history are dropped when a new item is
+ * added (never on update, so an item just settled is still there to read).
+ * Live items always stay.
+ */
+const keepNewestSettled = <T>(
+  items: ReadonlyArray<T>,
+  isSettled: (item: T) => boolean,
+  kept: number,
+): ReadonlyArray<T> => {
   let settledSeen = 0;
-  const keptNewestFirst = consults.toReversed().filter((consult) => {
-    if (consult.status === "running") return true;
+  const keptNewestFirst = items.toReversed().filter((item) => {
+    if (!isSettled(item)) return true;
     settledSeen += 1;
-    return settledSeen <= PAIR_ROOM_SETTLED_CONSULTS_KEPT;
+    return settledSeen <= kept;
   });
   return keptNewestFirst.toReversed();
 };
+
+const trimSettledConsults = (consults: ReadonlyArray<PairConsult>) =>
+  keepNewestSettled(
+    consults,
+    (consult) => consult.status !== "running",
+    PAIR_ROOM_SETTLED_CONSULTS_KEPT,
+  );
+
+/** Interrupted work stays: the user can still resume it. */
+const SETTLED_ASSIGNMENT_STATES: ReadonlySet<PairAssignmentState> = new Set([
+  "integrated",
+  "completed",
+  "rejected",
+  "cancelled",
+  "failed",
+]);
+
+const trimSettledAssignments = (assignments: ReadonlyArray<PairAssignment>) =>
+  keepNewestSettled(
+    assignments,
+    (assignment) => SETTLED_ASSIGNMENT_STATES.has(assignment.state),
+    PAIR_ROOM_SETTLED_ASSIGNMENTS_KEPT,
+  );
+
+const trimSettledDecisions = (decisions: ReadonlyArray<PairDecision>) =>
+  keepNewestSettled(
+    decisions,
+    (decision) => decision.resolution !== null,
+    PAIR_ROOM_SETTLED_DECISIONS_KEPT,
+  );
+
+const keepChangedFiles = (files: ReadonlyArray<string>) =>
+  files.slice(0, PAIR_ROOM_CHANGED_FILES_KEPT);
 
 const upsertPosition = (
   decision: PairDecision,
@@ -663,10 +711,17 @@ export function decidePairRoom(
       if (room.assignments.some((existing) => existing.assignmentId === command.assignmentId)) {
         return reject("conflict", `Assignment ${command.assignmentId} already exists.`);
       }
-      const overlapping = room.assignments.find(
-        (existing) =>
-          PAIR_ASSIGNMENT_ACTIVE_STATES.has(existing.state) &&
-          pairScopesOverlap(existing.scopeGlobs, command.scopeGlobs),
+      const active = room.assignments.filter((existing) =>
+        PAIR_ASSIGNMENT_ACTIVE_STATES.has(existing.state),
+      );
+      if (active.length >= PAIR_ROOM_ACTIVE_ASSIGNMENTS_MAX) {
+        return reject(
+          "conflict",
+          `This room already has ${active.length} assignments in progress. Wait for one to finish before assigning more.`,
+        );
+      }
+      const overlapping = active.find((existing) =>
+        pairScopesOverlap(existing.scopeGlobs, command.scopeGlobs),
       );
       if (overlapping) {
         return reject(
@@ -697,7 +752,11 @@ export function decidePairRoom(
         createdAt: command.at,
         updatedAt: command.at,
       };
-      return accept({ ...room, ...touched, assignments: [...room.assignments, assignment] });
+      return accept({
+        ...room,
+        ...touched,
+        assignments: trimSettledAssignments([...room.assignments, assignment]),
+      });
     }
 
     case "assignment.update": {
@@ -773,8 +832,8 @@ export function decidePairRoom(
           state,
           note: command.note !== undefined ? clampNullable(command.note) : assignment.note,
           report: command.report ?? assignment.report,
-          changedFiles: [...changedFiles],
-          deviations: [...deviations],
+          changedFiles: keepChangedFiles(changedFiles),
+          deviations: keepChangedFiles(deviations),
           scopeGlobs: [...scopeGlobs],
           approvedCommit,
           integrationCommit: command.integrationCommit ?? assignment.integrationCommit,
@@ -788,6 +847,13 @@ export function decidePairRoom(
       if (inactive) return { ok: false, rejection: inactive };
       if (room.decisions.some((existing) => existing.decisionId === command.decisionId)) {
         return reject("conflict", `Decision ${command.decisionId} already exists.`);
+      }
+      const open = room.decisions.filter((existing) => existing.resolution === null).length;
+      if (open >= PAIR_ROOM_OPEN_DECISIONS_MAX) {
+        return reject(
+          "conflict",
+          `This room has ${open} open decisions. Add your position to an existing one, or wait for the user to settle some.`,
+        );
       }
       const base: PairDecision = {
         decisionId: command.decisionId,
@@ -807,7 +873,11 @@ export function decidePairRoom(
         positions: upsertPosition(base, command.actor, command.position),
         ...leadResolution(base, command.actor, command.resolution),
       };
-      return accept({ ...room, ...touched, decisions: [...room.decisions, decision] });
+      return accept({
+        ...room,
+        ...touched,
+        decisions: trimSettledDecisions([...room.decisions, decision]),
+      });
     }
 
     case "decision.add-position": {

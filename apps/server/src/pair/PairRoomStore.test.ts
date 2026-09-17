@@ -73,6 +73,43 @@ it.layer(SqlitePersistenceMemory)("PairRoomStore", (it) => {
     }),
   );
 
+  it.effect("keeps a room whose assignment changed a file named only with spaces", () =>
+    Effect.gen(function* () {
+      const store = yield* PairRoomStore.make;
+      yield* store.dispatch(createRoom);
+      yield* store.dispatch({
+        type: "assignment.create",
+        roomId: ROOM_ID,
+        assignmentId: "assignment-1",
+        title: "Odd files",
+        threadId: ThreadId.make("assignee-thread"),
+        worktreePath: "/worktrees/pair-odd",
+        branch: "pair/odd",
+        baseCommit: "abc",
+        scopeGlobs: ["src/**"],
+        acceptanceCriteria: [],
+        expectedArtifact: "patch",
+        at: AT,
+      });
+      yield* store.dispatch({
+        type: "assignment.update",
+        roomId: ROOM_ID,
+        assignmentId: "assignment-1",
+        by: "server",
+        changedFiles: [" ", "src/a.ts"],
+        deviations: [" "],
+        at: AT,
+      });
+
+      const reloaded = yield* PairRoomStore.make;
+      const room = Option.getOrThrow(yield* reloaded.findByThread(LEAD_THREAD));
+      assert.deepEqual(room.assignments[0]?.changedFiles, [" ", "src/a.ts"]);
+
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`DELETE FROM pair_rooms`;
+    }),
+  );
+
   it.effect("streams every room first, then again after each change", () =>
     Effect.scoped(
       Effect.gen(function* () {

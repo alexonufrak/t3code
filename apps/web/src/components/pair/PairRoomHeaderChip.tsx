@@ -11,6 +11,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import {
+  PAIR_ROOM_CHANGED_FILES_KEPT,
   pairRoomParticipant,
   type PairAssignment,
   type PairDecision,
@@ -534,10 +535,28 @@ function MergeRequest(props: {
         <span className="font-medium text-foreground">{assignment.title}</span>
       </ThreadLink>
       <p className="text-muted-foreground">
-        {pairPersonaName(assignment.owner)}'s work on {assignment.branch} is approved by the Lead.{" "}
-        {assignment.changedFiles.length} changed{" "}
-        {assignment.changedFiles.length === 1 ? "file" : "files"}.
+        {pairPersonaName(assignment.owner)}'s work on {assignment.branch} is approved by the Lead.
       </p>
+      <p className="mt-1 text-muted-foreground">
+        Allowed to change: <span className="font-mono">{assignment.scopeGlobs.join(", ")}</span>
+        {assignment.scopeGlobs.some((glob) => glob === "**" || glob === "**/*")
+          ? " (the whole repository)"
+          : null}
+      </p>
+      <details className="mt-1 text-muted-foreground">
+        <summary className="cursor-pointer select-none">
+          {assignment.changedFiles.length}
+          {assignment.changedFiles.length >= PAIR_ROOM_CHANGED_FILES_KEPT ? "+" : ""} changed{" "}
+          {assignment.changedFiles.length === 1 ? "file" : "files"}
+        </summary>
+        <ul className="mt-1 max-h-40 overflow-y-auto font-mono">
+          {assignment.changedFiles.map((file) => (
+            <li key={file} className="break-all">
+              {file}
+            </li>
+          ))}
+        </ul>
+      </details>
       {assignment.report ? (
         <p className="mt-1 text-muted-foreground">{assignment.report.summary}</p>
       ) : null}

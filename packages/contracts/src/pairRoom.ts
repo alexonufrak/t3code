@@ -30,9 +30,18 @@ export const PAIR_ROOM_SETTLED_CONSULTS_KEPT = 20;
 export const PAIR_ROOM_HANDOFF_MAX_LENGTH = 16000;
 /** Threads a room remembers from before its Lead switches. */
 export const PAIR_ROOM_FORMER_PARTICIPANTS_KEPT = 20;
+/** Changed and out-of-scope files kept per assignment; the list says so when it is cut short. */
+export const PAIR_ROOM_CHANGED_FILES_KEPT = 200;
+/** Assignments running at once in one room. */
+export const PAIR_ROOM_ACTIVE_ASSIGNMENTS_MAX = 4;
+export const PAIR_ROOM_SETTLED_ASSIGNMENTS_KEPT = 20;
+export const PAIR_ROOM_OPEN_DECISIONS_MAX = 20;
+export const PAIR_ROOM_SETTLED_DECISIONS_KEPT = 20;
 
 const PairTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(PAIR_ROOM_TITLE_MAX_LENGTH));
 const PairText = TrimmedNonEmptyString.check(Schema.isMaxLength(PAIR_ROOM_TEXT_MAX_LENGTH));
+/** Repository paths are kept verbatim: a file can legally be named with only spaces. */
+const PairFilePath = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096));
 
 export const PairRoomId = TrimmedNonEmptyString.pipe(Schema.brand("PairRoomId"));
 export type PairRoomId = typeof PairRoomId.Type;
@@ -194,9 +203,9 @@ export const PairAssignment = Schema.Struct({
   /** Latest progress, review or integration note, for the card and the Lead. */
   note: Schema.NullOr(PairText),
   report: Schema.NullOr(PairAssignmentReport),
-  changedFiles: Schema.Array(TrimmedNonEmptyString),
+  changedFiles: Schema.Array(PairFilePath),
   /** Changed files outside `scopeGlobs`. Lead approval is refused while any remain. */
-  deviations: Schema.Array(TrimmedNonEmptyString),
+  deviations: Schema.Array(PairFilePath),
   /** The commit the Lead approved. Merging takes exactly this commit, or nothing. */
   approvedCommit: Schema.NullOr(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
