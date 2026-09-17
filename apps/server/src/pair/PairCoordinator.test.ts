@@ -31,7 +31,7 @@ import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import * as PairCoordinator from "./PairCoordinator.ts";
 import * as PairRoomStore from "./PairRoomStore.ts";
-import { PairWorkspace, type PairIntegrationResult } from "./PairWorkspace.ts";
+import { PairWorkspace, PairWorkspaceError, type PairIntegrationResult } from "./PairWorkspace.ts";
 
 const PROJECT_ID = ProjectId.make("project-1");
 const LEAD = ThreadId.make("lead-thread");
@@ -123,6 +123,7 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
   // Replay covers the coordinator subscribing to runtime events after a test publishes one.
   const runtimeEvents = yield* PubSub.unbounded<ProviderRuntimeEvent>({ replay: 8 });
   const changedFiles = yield* Ref.make<ReadonlyArray<string>>([]);
+  const repository = yield* Ref.make<boolean>(true);
   const integration = yield* Ref.make<PairIntegrationResult>({
     status: "merged",
     commit: "merge1234567890",
@@ -173,6 +174,19 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
     }),
     Layer.mock(ProviderService)({ streamEvents: Stream.fromPubSub(runtimeEvents) }),
     Layer.mock(PairWorkspace)({
+      assertRepository: ({ cwd }) =>
+        Ref.get(repository).pipe(
+          Effect.flatMap((isRepository) =>
+            isRepository
+              ? Effect.void
+              : Effect.fail(
+                  new PairWorkspaceError({
+                    operation: "assertRepository",
+                    detail: `Pair rooms need a git repository ... and ${cwd} is not one.`,
+                  }),
+                ),
+          ),
+        ),
       resolveCommit: () => Effect.succeed("base1234567890"),
       syncReviewWorktree: () =>
         Effect.succeed({ worktreePath: REVIEW_WORKTREE, snapshotCommit: "snap1234567890" }),
@@ -311,6 +325,7 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
     createRoom,
     sendUserMessage,
     changedFiles,
+    repository,
     integration,
     domainEvents,
     runtimeEvents,
@@ -911,6 +926,19 @@ describe("PairCoordinator", () => {
           to: "astra",
           fromThreadId: LEAD,
         });
+      }),
+    ),
+  );
+
+  it.effect("refuses a room in a folder git does not track, before the first turn", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        yield* Ref.set(harness.repository, false);
+        const error = yield* Effect.flip(harness.createRoom("roundtable"));
+        expect(error).toMatchObject({ reason: "invalid" });
+        expect(error.detail).toContain("/repo is not one");
+        expect(yield* harness.store.list).toEqual([]);
       }),
     ),
   );

@@ -346,6 +346,17 @@ export const make = Effect.gen(function* () {
   const threadShell = (threadId: ThreadId) =>
     snapshots.getThreadShellById(threadId).pipe(Effect.mapError(internal("read thread")));
 
+  /** Where a participant works: its own worktree, or the project the thread belongs to. */
+  const threadCwd = (shell: OrchestrationThreadShell) =>
+    Effect.gen(function* () {
+      const project = yield* snapshots
+        .getProjectShellById(shell.projectId)
+        .pipe(Effect.mapError(internal("read project")));
+      const cwd = shell.worktreePath ?? Option.getOrUndefined(project)?.workspaceRoot;
+      if (!cwd) return yield* rejected("not-found", "The Lead's project no longer exists.");
+      return cwd;
+    });
+
   const apply = (command: Parameters<typeof store.dispatch>[0]) =>
     store
       .dispatch(command)
@@ -397,11 +408,7 @@ export const make = Effect.gen(function* () {
           `${personaName(lead.persona)} leads this room on ${expected}, but its thread now uses ${shell.value.modelSelection.model}. Switch the thread back to ${expected} to continue.`,
         );
       }
-      const project = yield* snapshots
-        .getProjectShellById(shell.value.projectId)
-        .pipe(Effect.mapError(internal("read project")));
-      const cwd = shell.value.worktreePath ?? Option.getOrUndefined(project)?.workspaceRoot;
-      if (!cwd) return yield* rejected("not-found", "The Lead's project no longer exists.");
+      const cwd = yield* threadCwd(shell.value);
       const activeTurnId =
         shell.value.session?.activeTurnId ??
         (shell.value.latestTurn?.state === "running" ? shell.value.latestTurn.turnId : null);
@@ -1431,6 +1438,20 @@ export const make = Effect.gen(function* () {
             return yield* rejected(
               "invalid",
               `The Lead thread uses ${shell.value.modelSelection.model}, not ${PAIR_PERSONAS[command.leadPersona].model}.`,
+            );
+          }
+          // Without a repository the Peer has nowhere to work, which would only
+          // surface as a failed consult in the middle of the Lead's first turn.
+          if (Option.isSome(shell)) {
+            yield* fromWorkspace(
+              workspace.assertRepository({ cwd: yield* threadCwd(shell.value) }),
+            ).pipe(
+              Effect.catch((error: PairRoomRejectedError) =>
+                rejected(
+                  "workspace",
+                  `${error.detail} Open the repository itself as the project, or run git init there, and start the room again.`,
+                ),
+              ),
             );
           }
           const room = yield* apply({

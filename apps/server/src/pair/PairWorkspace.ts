@@ -41,6 +41,10 @@ export class PairWorkspace extends Context.Service<
   PairWorkspace,
   {
     /** Resolves `ref` (default HEAD) in the Lead's checkout. Fails outside a git repository. */
+    /** Fails unless `cwd` is inside a git repository, which a room needs before it starts. */
+    readonly assertRepository: (input: {
+      readonly cwd: string;
+    }) => Effect.Effect<void, PairWorkspaceError>;
     readonly resolveCommit: (input: {
       readonly cwd: string;
       readonly ref?: string | undefined;
@@ -154,8 +158,7 @@ export const make = Effect.gen(function* () {
           : Effect.fail(
               new PairWorkspaceError({
                 operation,
-                detail:
-                  "Pair Room needs a git repository so the Peer can work on a copy instead of your files.",
+                detail: `Pair rooms need a git repository so the Peer can work on a copy instead of your files, and ${cwd} is not one.`,
               }),
             ),
       ),
@@ -202,6 +205,9 @@ export const make = Effect.gen(function* () {
 
   const worktreePathFor = (root: string, name: string) =>
     path.join(worktreesRoot, path.basename(root), name);
+
+  const assertRepository = (input: { readonly cwd: string }) =>
+    repoRoot("assertRepository", input.cwd).pipe(Effect.asVoid);
 
   const resolveCommit = (input: { readonly cwd: string; readonly ref?: string | undefined }) =>
     Effect.gen(function* () {
@@ -393,6 +399,7 @@ export const make = Effect.gen(function* () {
     });
 
   return PairWorkspace.of({
+    assertRepository,
     resolveCommit,
     syncReviewWorktree,
     planAssignmentWorktree,

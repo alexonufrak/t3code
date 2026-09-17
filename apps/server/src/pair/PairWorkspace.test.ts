@@ -96,15 +96,17 @@ it.layer(TestLayer)("PairWorkspace", (it) => {
         }),
     );
 
-    it.effect("explains that a folder outside git cannot host a pair room", () =>
+    it.effect("names the folder when it is outside git, before and during a room", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
         const workspace = yield* PairWorkspace.PairWorkspace;
         const plain = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pair-plain-" });
+        const refused = yield* workspace.assertRepository({ cwd: plain }).pipe(Effect.flip);
+        expect(refused.detail).toContain(`${plain} is not one`);
         const error = yield* workspace
           .syncReviewWorktree({ roomId: PairRoomId.make("room-plain"), leadCwd: plain })
           .pipe(Effect.flip);
-        expect(error.detail).toContain("needs a git repository");
+        expect(error.detail).toContain("need a git repository");
       }),
     );
   });
