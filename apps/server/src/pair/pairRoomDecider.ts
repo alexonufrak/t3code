@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import {
   PAIR_ASSIGNMENT_ACTIVE_STATES,
+  PAIR_CONVERSATION_MAX_EXCHANGES,
   PAIR_ROOM_ACTIVE_ASSIGNMENTS_MAX,
   PAIR_ROOM_CHANGED_FILES_KEPT,
   PAIR_ROOM_DEFAULT_MAX_ROUNDS,
@@ -52,6 +53,7 @@ export type PairRejectionReason =
   | "room-closed"
   | "peer-busy"
   | "round-limit"
+  | "conversation-limit"
   | "scope-overlap"
   | "scope-deviation"
   | "decision-authority"
@@ -115,11 +117,21 @@ export type PairRoomCommand =
       readonly automatic: boolean;
       /** Defaults to "tool". */
       readonly answerTo?: PairConsultAnswerTo;
+      /** The consult this one continues; the chain is one conversation. */
+      readonly continues?: string | null;
       readonly title: string;
       readonly at: string;
     }
   | {
-      /** A "lead-turn" answer reached the Lead, or will never need to. */
+      /** The Peer wants the Lead to answer something before this rests. */
+      readonly type: "consult.ask";
+      readonly roomId: PairRoomId;
+      readonly consultId: string;
+      readonly question: string;
+      readonly at: string;
+    }
+  | {
+      /** The reply reached the Lead, or will never need to. */
       readonly type: "consult.answer-delivered";
       readonly roomId: PairRoomId;
       readonly consultId: string;
@@ -162,6 +174,7 @@ export type PairRoomCommand =
       readonly scopeGlobs?: ReadonlyArray<string> | undefined;
       readonly approvedCommit?: string | undefined;
       readonly integrationCommit?: string | undefined;
+      readonly blockedDeliveredAt?: string | undefined;
       readonly at: string;
     }
   | {
@@ -383,11 +396,32 @@ export const pairScopeDeviations = (
 
 // ── Rounds ──────────────────────────────────────────────────────────────
 
+/** Conversations the Lead opened in this turn. Replies and sign-offs continue one; they are not rounds. */
 export const pairRoundsUsed = (room: PairRoom, leadTurnId: TurnId | null): number =>
   leadTurnId === null
     ? 0
-    : room.consults.filter((consult) => consult.leadTurnId === leadTurnId && !consult.automatic)
-        .length;
+    : room.consults.filter(
+        (consult) =>
+          consult.leadTurnId === leadTurnId && !consult.automatic && consult.continues === null,
+      ).length;
+
+/** The conversation a consult belongs to, oldest first, as far as the room still remembers it. */
+export const pairConversation = (room: PairRoom, consultId: string): ReadonlyArray<PairConsult> => {
+  const chain: Array<PairConsult> = [];
+  let current = room.consults.find((consult) => consult.consultId === consultId);
+  while (current && !chain.includes(current)) {
+    chain.push(current);
+    const previous = current.continues;
+    current = previous
+      ? room.consults.find((consult) => consult.consultId === previous)
+      : undefined;
+  }
+  return chain.toReversed();
+};
+
+/** Which exchange of its conversation a consult is, counting from 1. */
+export const pairExchangeIndex = (room: PairRoom, consultId: string): number =>
+  pairConversation(room, consultId).length;
 
 export const pairRoundLimit = (room: PairRoom, leadTurnId: TurnId | null): number =>
   room.maxRoundsPerTurn +
@@ -506,11 +540,22 @@ const keepNewestSettled = <T>(
   return keptNewestFirst.toReversed();
 };
 
-/** An answer still owed to the Lead keeps its consult, whatever its age. */
-export const pairConsultAnswerOwed = (consult: PairConsult) =>
-  consult.answerTo === "lead-turn" &&
-  consult.status !== "running" &&
-  consult.answerDeliveredAt === null;
+/**
+ * A reply the Lead has not received yet. It keeps its consult, whatever its
+ * age, and reaches the Lead as a turn once no tool call is there to take it.
+ */
+export const pairConsultAnswerOwed = (consult: PairConsult) => {
+  if (consult.status === "running" || consult.answerDeliveredAt !== null) return false;
+  switch (consult.answerTo) {
+    // A relayed message's outcome always comes back, even a failure.
+    case "lead-turn":
+      return true;
+    case "tool":
+      return consult.status === "answered";
+    case "sign-off":
+      return consult.status === "answered" && consult.peerAsk !== null;
+  }
+};
 
 const trimSettledConsults = (consults: ReadonlyArray<PairConsult>) =>
   keepNewestSettled(
@@ -683,12 +728,27 @@ export function decidePairRoom(
           "The Peer is still answering another consult. Wait for it with pair_wait first.",
         );
       }
+      const continues = command.continues ?? null;
+      if (continues !== null) {
+        const previous = room.consults.find((consult) => consult.consultId === continues);
+        if (!previous) return reject("not-found", `Consult ${continues} is too old to continue.`);
+        if (previous.status === "running") {
+          return reject("peer-busy", "The Peer has not replied to that consult yet.");
+        }
+        const exchanges = pairConversation(room, continues).length;
+        if (exchanges >= PAIR_CONVERSATION_MAX_EXCHANGES) {
+          return reject(
+            "conversation-limit",
+            `This conversation has run ${exchanges} exchanges, the most a room allows. Decide with what you have, and record anything still unresolved with pair_record_decision.`,
+          );
+        }
+      }
       const used = pairRoundsUsed(room, command.leadTurnId);
       const limit = pairRoundLimit(room, command.leadTurnId);
-      if (!command.automatic && used >= limit) {
+      if (!command.automatic && continues === null && used >= limit) {
         return reject(
           "round-limit",
-          `This turn already used ${used} of ${limit} consult rounds. Decide with what you have, or tell the user you want more rounds.`,
+          `This turn already opened ${used} of ${limit} conversations with the Peer. Continue one with pair_reply, decide with what you have, or tell the user you want more.`,
         );
       }
       if (room.consults.some((consult) => consult.consultId === command.consultId)) {
@@ -703,10 +763,12 @@ export function decidePairRoom(
             consultId: command.consultId,
             kind: command.kind,
             leadTurnId: command.leadTurnId,
-            round: used + 1,
+            round: continues === null ? used + 1 : Math.max(used, 1),
             automatic: command.automatic,
             answerTo: command.answerTo ?? "tool",
             answerDeliveredAt: null,
+            continues,
+            peerAsk: null,
             status: "running",
             peerTurnId: null,
             title: clampTitle(command.title),
@@ -715,6 +777,22 @@ export function decidePairRoom(
             settledAt: null,
           },
         ]),
+      });
+    }
+
+    case "consult.ask": {
+      const consult = room.consults.find((candidate) => candidate.consultId === command.consultId);
+      if (!consult) return reject("not-found", `Consult ${command.consultId} was not found.`);
+      if (consult.status !== "running") {
+        return reject("invalid", "That consult has already settled; ask in your next reply.");
+      }
+      return accept({
+        ...room,
+        ...touched,
+        consults: replaceById(room.consults, "consultId", {
+          ...consult,
+          peerAsk: clampPairText(command.question),
+        }),
       });
     }
 
@@ -798,6 +876,7 @@ export function decidePairRoom(
         deviations: [],
         approvedCommit: null,
         integrationCommit: null,
+        blockedDeliveredAt: null,
         createdAt: command.at,
         updatedAt: command.at,
       };
@@ -886,6 +965,12 @@ export function decidePairRoom(
           scopeGlobs: [...scopeGlobs],
           approvedCommit,
           integrationCommit: command.integrationCommit ?? assignment.integrationCommit,
+          // A blocker is brought to the Lead once; moving on clears it for the next one.
+          blockedDeliveredAt:
+            state !== "blocked"
+              ? null
+              : (command.blockedDeliveredAt ??
+                (assignment.state === "blocked" ? assignment.blockedDeliveredAt : null)),
           updatedAt: command.at,
         }),
       });

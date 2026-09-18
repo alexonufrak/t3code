@@ -1,5 +1,6 @@
 import {
   MessageId,
+  PAIR_CONVERSATION_MAX_EXCHANGES,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -114,14 +115,18 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
   >;
   /** Thread messages already on disk when the coordinator starts. */
   readonly messages?: ReadonlyMap<ThreadId, OrchestrationThread["messages"]>;
+  /** Thread shells when the coordinator starts; by default the Lead is mid-turn. */
+  readonly shells?: ReadonlyMap<ThreadId, OrchestrationThreadShell>;
 }) {
   const commands = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
   // The engine answers a repeated command id with its first receipt; so does this.
   const receipts = new Set<string>();
   const shells = yield* Ref.make(
-    new Map<ThreadId, OrchestrationThreadShell>([
-      [LEAD, makeShell({ id: LEAD, session: runningSession(LEAD, LEAD_TURN) })],
-    ]),
+    new Map<ThreadId, OrchestrationThreadShell>(
+      options?.shells ?? [
+        [LEAD, makeShell({ id: LEAD, session: runningSession(LEAD, LEAD_TURN) })],
+      ],
+    ),
   );
   const messages = yield* Ref.make(
     new Map<ThreadId, OrchestrationThread["messages"]>(options?.messages ?? []),
@@ -270,6 +275,8 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
     readonly answer?: string;
     /** Defaults to the turn the latest `thread.turn.start` on the thread began. */
     readonly turnId?: TurnId;
+    /** Defaults to the moment the turn was requested. */
+    readonly completedAt?: string;
   }) {
     const turnStart = (yield* recorded("thread.turn.start")).findLast(
       (command) => command.threadId === input.threadId,
@@ -283,7 +290,7 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
         state: input.state,
         requestedAt,
         startedAt: requestedAt,
-        completedAt: requestedAt,
+        completedAt: input.completedAt ?? requestedAt,
         assistantMessageId: null,
       },
     });
@@ -410,6 +417,19 @@ const leadTurnEnded = (state: "completed" | "interrupted") => ({
     assistantMessageId: null,
   },
 });
+
+const appendsTo = (harness: Effect.Success<ReturnType<typeof makeHarness>>, threadId: ThreadId) =>
+  harness.recorded("thread.message.user.append").pipe(
+    Effect.map((commands) =>
+      commands
+        .filter((command) => command.threadId === threadId)
+        .map((command) => ({
+          text: command.message.text,
+          note: readPairRoomNote(command.message.context),
+          createdAt: command.createdAt,
+        })),
+    ),
+  );
 
 describe("PairCoordinator", () => {
   it("recognizes an @-mention only as its own word", () => {
@@ -593,7 +613,7 @@ describe("PairCoordinator", () => {
         expect(turnStart?.threadId).toBe(peerThreadId);
         expect(turnStart?.modelSelection).toMatchObject({ model: "gpt-6-astra" });
         expect(turnStart?.message.text).toContain(
-          "Pair Room consult from Fable (Lead). You are Astra (Peer).",
+          "Pair Room: Fable (Lead) is asking you. You are Astra (Peer).",
         );
         expect(turnStart?.message.text).toContain("Is retrying 401 responses safe?");
         expect(readPairRoomNote(turnStart?.message.context)).toEqual({
@@ -1167,22 +1187,6 @@ describe("PairCoordinator", () => {
   );
 
   describe("transcript", () => {
-    const appendsTo = (
-      harness: Effect.Success<ReturnType<typeof makeHarness>>,
-      threadId: ThreadId,
-    ) =>
-      harness.recorded("thread.message.user.append").pipe(
-        Effect.map((commands) =>
-          commands
-            .filter((command) => command.threadId === threadId)
-            .map((command) => ({
-              text: command.message.text,
-              note: readPairRoomNote(command.message.context),
-              createdAt: command.createdAt,
-            })),
-        ),
-      );
-
     it.effect(
       "catches a new Peer up on the Lead's thread, then copies what each side says without starting turns",
       () =>
@@ -1232,6 +1236,9 @@ describe("PairCoordinator", () => {
               answer: "Add jitter too.",
             });
             yield* harness.roomWhere((room) => room.consults[0]?.status === "answered");
+            // The Lead takes the reply here, the way a waiting Lead does.
+            const read = yield* harness.coordinator.wait(LEAD, { handle: consult.handle! });
+            expect(read).toMatchObject({ status: "answered", answer: "Add jitter too." });
 
             // The Lead's final answer and its changed files reach the Peer.
             yield* harness.finishTurn({
@@ -1465,6 +1472,528 @@ describe("PairCoordinator", () => {
               return [`pair:transcript:${key}`, `pair-transcript-${key}`];
             }),
           );
+        }),
+      ),
+    );
+  });
+
+  describe("conversation", () => {
+    const noteOf = (command: OrchestrationCommand) =>
+      command.type === "thread.turn.start" ? readPairRoomNote(command.message.context) : null;
+
+    /** Opens a consult, has the Peer answer it, and lets the Lead read the answer through pair_wait. */
+    const converse = Effect.fn("converse")(function* (
+      harness: Effect.Success<ReturnType<typeof makeHarness>>,
+      roomId: PairRoomId,
+    ) {
+      const opened = yield* harness.coordinator.consult(LEAD, {
+        question: "Is exponential backoff enough?",
+        waitSeconds: 0,
+      });
+      const peerThreadId = yield* peerThreadOf(harness.store, roomId);
+      yield* harness.finishTurn({
+        threadId: peerThreadId,
+        state: "completed",
+        answer: "Add jitter, or retries stampede.",
+      });
+      yield* harness.roomWhere((room) => room.consults[0]?.status === "answered");
+      const read = yield* harness.coordinator.wait(LEAD, { handle: opened.handle! });
+      expect(read).toMatchObject({ status: "answered", exchange: 1 });
+      return { handle: opened.handle!, peerThreadId };
+    });
+
+    it.effect(
+      "lets the Peer ask before answering, and the Lead reply to keep the conversation going",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const harness = yield* makeHarness();
+            const roomId = yield* harness.createRoom();
+            const opened = yield* harness.coordinator.consult(LEAD, {
+              question: "Should retries back off?",
+              waitSeconds: 0,
+            });
+            const peerThreadId = yield* peerThreadOf(harness.store, roomId);
+
+            const asked = yield* harness.coordinator.ask(peerThreadId, {
+              question: "Client retries or the worker's?",
+            });
+            expect(asked).toMatchObject({ status: "recorded", handle: opened.handle });
+            yield* harness.finishTurn({
+              threadId: peerThreadId,
+              state: "completed",
+              answer: "Depends which retries you mean.",
+            });
+            const question = yield* harness.coordinator.wait(LEAD, { handle: opened.handle! });
+            expect(question).toMatchObject({
+              status: "question",
+              question: "Client retries or the worker's?",
+              answer: "Depends which retries you mean.",
+              exchange: 1,
+              exchangeLimit: PAIR_CONVERSATION_MAX_EXCHANGES,
+            });
+
+            const replied = yield* harness.coordinator.reply(LEAD, {
+              handle: opened.handle!,
+              message: "The worker's.",
+              waitSeconds: 0,
+            });
+            expect(replied).toMatchObject({ status: "pending", exchange: 2 });
+            expect(replied.handle).not.toBe(opened.handle);
+            const replyTurn = (yield* harness.recorded("thread.turn.start")).at(-1)!;
+            expect(replyTurn.threadId).toBe(peerThreadId);
+            expect(noteOf(replyTurn)).toEqual({ purpose: "reply", from: "fable", to: "astra" });
+            expect(replyTurn.message.text).toContain(
+              "Fable (Lead) replies in your critique conversation",
+            );
+            expect(replyTurn.message.text).toContain("Exchange 2 of");
+            expect(replyTurn.message.text).toContain("The worker's.");
+
+            yield* harness.finishTurn({
+              threadId: peerThreadId,
+              state: "completed",
+              answer: "Then cap at five with jitter.",
+            });
+            const answered = yield* harness.coordinator.wait(LEAD, { handle: replied.handle! });
+            expect(answered).toMatchObject({
+              status: "answered",
+              answer: "Then cap at five with jitter.",
+              exchange: 2,
+            });
+            // A reply continues a conversation; it is not a new round.
+            const status = yield* harness.coordinator.status(LEAD);
+            expect(status.rounds).toEqual({ used: 1, limit: 2 });
+            expect(status.consults.map((entry) => [entry.exchange, entry.peerAsk])).toEqual([
+              [1, "Client retries or the worker's?"],
+              [2, null],
+            ]);
+          }),
+        ),
+    );
+
+    it.effect(
+      "brings a reply the Lead never read to it as a turn, then lets the Peer check the Lead's answer",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const harness = yield* makeHarness();
+            const roomId = yield* harness.createRoom();
+            const opened = yield* harness.coordinator.consult(LEAD, {
+              question: "Is exponential backoff enough?",
+              waitSeconds: 0,
+            });
+            const peerThreadId = yield* peerThreadOf(harness.store, roomId);
+            yield* harness.finishTurn({
+              threadId: peerThreadId,
+              state: "completed",
+              answer: "Add jitter, or retries stampede.",
+            });
+            yield* harness.roomWhere((room) => room.consults[0]?.status === "answered");
+
+            // The Lead moved on without pair_wait, so the reply comes as a turn once it is idle.
+            yield* harness.finishTurn({
+              threadId: LEAD,
+              state: "completed",
+              answer: "Backoff is in.",
+              turnId: LEAD_TURN,
+            });
+            const delivered = asTurnStart(
+              yield* harness.commandWhere(turnStartWhere((command) => command.threadId === LEAD)),
+            );
+            expect(noteOf(delivered)).toEqual({
+              purpose: "peer-answer",
+              from: "astra",
+              to: "fable",
+            });
+            expect(delivered.message.text).toContain("after your turn had ended");
+            expect(delivered.message.text).toContain(`pair_reply (handle ${opened.handle})`);
+            expect(delivered.message.text).toContain("Add jitter, or retries stampede.");
+            const room = Option.getOrThrow(yield* harness.store.get(roomId));
+            expect(room.consults[0]?.answerDeliveredAt).toBe(delivered.createdAt);
+
+            // That turn took the reply, so when it ends the Peer gets the Lead's answer to check.
+            yield* harness.finishTurn({
+              threadId: LEAD,
+              state: "completed",
+              answer: "Jitter added, capped at 30s.",
+            });
+            const signOff = asTurnStart(
+              yield* harness.commandWhere((command) => noteOf(command)?.purpose === "sign-off"),
+            );
+            expect(signOff.threadId).toBe(peerThreadId);
+            expect(signOff.message.text).toContain("Fable's (Lead) turn has ended");
+            expect(signOff.message.text).toContain("- Is exponential backoff enough?");
+            expect(signOff.message.text).toContain("Jitter added, capped at 30s.");
+            expect(noteOf(signOff)?.source).toMatchObject({ speaker: "agent", threadId: LEAD });
+            const checked = Option.getOrThrow(yield* harness.store.get(roomId));
+            expect(checked.consults.at(-1)).toMatchObject({
+              answerTo: "sign-off",
+              continues: opened.handle,
+              automatic: true,
+              status: "running",
+            });
+
+            // A quiet sign-off becomes a line in the Lead's thread, not a Lead turn.
+            yield* harness.finishTurn({
+              threadId: peerThreadId,
+              state: "completed",
+              answer: "Aligned; the cap is right.",
+            });
+            const line = yield* harness.commandWhere(
+              (command) =>
+                command.type === "thread.message.user.append" &&
+                command.threadId === LEAD &&
+                command.message.text.includes("Aligned; the cap is right."),
+            );
+            expect(line).toMatchObject({
+              message: { text: "Astra (Peer) → you: Aligned; the cap is right." },
+            });
+            // The Lead going idle again starts nothing more: each Lead turn is checked once.
+            yield* PubSub.publish(harness.domainEvents, threadEvent("thread.session-set", LEAD));
+            yield* harness.roomWhere((room) => room.consults.at(-1)?.status === "answered");
+            const leadTurns = (yield* harness.recorded("thread.turn.start")).filter(
+              (command) => command.threadId === LEAD,
+            );
+            expect(leadTurns).toHaveLength(1);
+            const signOffs = () =>
+              harness
+                .recorded("thread.turn.start")
+                .pipe(
+                  Effect.map((commands) =>
+                    commands.filter((command) => noteOf(command)?.purpose === "sign-off"),
+                  ),
+                );
+            expect(yield* signOffs()).toHaveLength(1);
+            // A later Lead turn that took no reply is not checked either.
+            yield* harness.finishTurn({
+              threadId: LEAD,
+              state: "completed",
+              answer: "Also tidied the client.",
+              turnId: TurnId.make("lead-turn-3"),
+            });
+            yield* harness.commandWhere(
+              (command) =>
+                command.type === "thread.message.user.append" &&
+                command.message.text.includes("Also tidied the client."),
+            );
+            expect(yield* signOffs()).toHaveLength(1);
+          }),
+        ),
+    );
+
+    it.effect("checks every conversation the Lead read in a turn with one sign-off", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness();
+          const roomId = yield* harness.createRoom();
+          const handles: Array<string> = [];
+          for (const [index, question] of [
+            "Is exponential backoff enough?",
+            "Should retries be capped?",
+          ].entries()) {
+            const opened = yield* harness.coordinator.consult(LEAD, { question, waitSeconds: 0 });
+            yield* harness.finishTurn({
+              threadId: yield* peerThreadOf(harness.store, roomId),
+              state: "completed",
+              answer: `Answer ${index + 1}`,
+            });
+            yield* harness.roomWhere((room) => room.consults[index]?.status === "answered");
+            yield* harness.coordinator.wait(LEAD, { handle: opened.handle! });
+            handles.push(opened.handle!);
+          }
+          const peerThreadId = yield* peerThreadOf(harness.store, roomId);
+          yield* harness.finishTurn({
+            threadId: LEAD,
+            state: "completed",
+            answer: "Both are in.",
+            turnId: LEAD_TURN,
+          });
+          const signOff = asTurnStart(
+            yield* harness.commandWhere((command) => noteOf(command)?.purpose === "sign-off"),
+          );
+          expect(signOff.message.text).toContain("- Is exponential backoff enough?");
+          expect(signOff.message.text).toContain("- Should retries be capped?");
+          const room = Option.getOrThrow(yield* harness.store.get(roomId));
+          expect(room.consults.at(-1)).toMatchObject({
+            answerTo: "sign-off",
+            continues: handles[1],
+          });
+          yield* harness.finishTurn({
+            threadId: peerThreadId,
+            state: "completed",
+            answer: "Both hold.",
+          });
+          yield* harness.roomWhere((r) => r.consults.at(-1)?.status === "answered");
+          // The first conversation was covered by that sign-off; a later turn does not revisit it.
+          yield* harness.finishTurn({
+            threadId: LEAD,
+            state: "completed",
+            answer: "Docs too.",
+            turnId: TurnId.make("lead-turn-3"),
+          });
+          yield* harness.commandWhere(
+            (command) =>
+              command.type === "thread.message.user.append" &&
+              command.message.text.includes("Docs too."),
+          );
+          const signOffs = (yield* harness.recorded("thread.turn.start")).filter(
+            (command) => noteOf(command)?.purpose === "sign-off",
+          );
+          expect(signOffs).toHaveLength(1);
+        }),
+      ),
+    );
+
+    it.effect(
+      "leaves a turn that ended before the reply it brought to the turn that follows, across a restart",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const peerThreadId = ThreadId.make("peer-thread");
+            const idleLead = makeShell({
+              id: LEAD,
+              session: runningSession(LEAD, null),
+              latestTurn: {
+                turnId: LEAD_TURN,
+                state: "completed",
+                requestedAt: MESSAGE_AT,
+                startedAt: MESSAGE_AT,
+                completedAt: MESSAGE_AT,
+                assistantMessageId: null,
+              },
+            });
+            const harness = yield* makeHarness({
+              seed: (store) =>
+                Effect.gen(function* () {
+                  const room = yield* store.dispatch({
+                    type: "room.create",
+                    roomId: "room-restart" as PairRoomId,
+                    projectId: PROJECT_ID,
+                    leadThreadId: LEAD,
+                    leadPersona: "fable",
+                    mode: "adaptive",
+                    at: MESSAGE_AT,
+                  });
+                  yield* store.dispatch({
+                    type: "peer.attach",
+                    roomId: room.roomId,
+                    threadId: peerThreadId,
+                    reviewWorktreePath: REVIEW_WORKTREE,
+                    at: MESSAGE_AT,
+                  });
+                  yield* store.dispatch({
+                    type: "consult.request",
+                    roomId: room.roomId,
+                    consultId: "c1",
+                    kind: "critique",
+                    leadTurnId: LEAD_TURN,
+                    automatic: false,
+                    title: "Is exponential backoff enough?",
+                    at: MESSAGE_AT,
+                  });
+                  yield* store.dispatch({
+                    type: "consult.settle",
+                    roomId: room.roomId,
+                    consultId: "c1",
+                    status: "answered",
+                    peerTurnId: null,
+                    error: null,
+                    at: MESSAGE_AT,
+                  });
+                  // The room brought the reply as a Lead turn the server stopped before seeing start.
+                  yield* store.dispatch({
+                    type: "consult.answer-delivered",
+                    roomId: room.roomId,
+                    consultId: "c1",
+                    at: "1970-01-01T00:00:01.000Z",
+                  });
+                }),
+              shells: new Map([
+                [LEAD, idleLead],
+                [peerThreadId, makeShell({ id: peerThreadId })],
+              ]),
+              messages: new Map([
+                [
+                  LEAD,
+                  [
+                    {
+                      id: MessageId.make("lead-answer-1"),
+                      role: "assistant",
+                      text: "Backoff is in.",
+                      turnId: LEAD_TURN,
+                      streaming: false,
+                      createdAt: MESSAGE_AT,
+                      updatedAt: MESSAGE_AT,
+                    },
+                  ] as unknown as OrchestrationThread["messages"],
+                ],
+              ]),
+            });
+            const signOffs = () =>
+              harness
+                .recorded("thread.turn.start")
+                .pipe(
+                  Effect.map((commands) =>
+                    commands.filter((command) => noteOf(command)?.purpose === "sign-off"),
+                  ),
+                );
+            // Reconciliation ran at boot; the turn that ended before the reply is not checked.
+            expect(yield* signOffs()).toEqual([]);
+            yield* harness.finishTurn({
+              threadId: LEAD,
+              state: "completed",
+              answer: "Jitter added.",
+              turnId: TurnId.make("lead-turn-2"),
+              completedAt: "1970-01-01T00:00:02.000Z",
+            });
+            const signOff = asTurnStart(
+              yield* harness.commandWhere((command) => noteOf(command)?.purpose === "sign-off"),
+            );
+            expect(signOff.message.text).toContain("Jitter added.");
+            expect(yield* signOffs()).toHaveLength(1);
+          }),
+        ),
+    );
+
+    it.effect("brings a sign-off the Peer wants a word about back to the Lead", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness();
+          const roomId = yield* harness.createRoom();
+          const { handle, peerThreadId } = yield* converse(harness, roomId);
+          yield* harness.finishTurn({
+            threadId: LEAD,
+            state: "completed",
+            answer: "Backoff without jitter, keeping it simple.",
+            turnId: LEAD_TURN,
+          });
+          yield* harness.commandWhere((command) => noteOf(command)?.purpose === "sign-off");
+          yield* harness.coordinator.ask(peerThreadId, {
+            question: "Without jitter the stampede is still there; was that on purpose?",
+          });
+          yield* harness.finishTurn({
+            threadId: peerThreadId,
+            state: "completed",
+            answer: "Checked the loop: all workers wake together.",
+          });
+          const objection = asTurnStart(
+            yield* harness.commandWhere(
+              turnStartWhere(
+                (command) =>
+                  command.threadId === LEAD &&
+                  readPairRoomNote(command.message.context)?.purpose === "peer-answer",
+              ),
+            ),
+          );
+          expect(objection.message.text).toContain("has something you should hear");
+          expect(objection.message.text).toContain("Astra asks: Without jitter the stampede");
+          expect(objection.message.text).toContain("all workers wake together");
+          expect(objection.message.text).not.toContain(`handle ${handle})`);
+          expect(yield* appendsTo(harness, LEAD)).toEqual([]);
+        }),
+      ),
+    );
+
+    it.effect("stops a conversation at its exchange limit", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness();
+          const roomId = yield* harness.createRoom();
+          const opened = yield* converse(harness, roomId);
+          let handle = opened.handle;
+          for (let exchange = 2; exchange <= PAIR_CONVERSATION_MAX_EXCHANGES; exchange += 1) {
+            const replied = yield* harness.coordinator.reply(LEAD, {
+              handle,
+              message: `Point ${exchange}`,
+              waitSeconds: 0,
+            });
+            expect(replied).toMatchObject({ status: "pending", exchange });
+            handle = replied.handle!;
+            const turn = (yield* harness.recorded("thread.turn.start")).at(-1)!;
+            if (exchange === PAIR_CONVERSATION_MAX_EXCHANGES) {
+              expect(turn.message.text).toContain("this is the last one in this conversation");
+            }
+            yield* harness.finishTurn({
+              threadId: opened.peerThreadId,
+              state: "completed",
+              answer: `Counter ${exchange}`,
+            });
+            yield* harness.coordinator.wait(LEAD, { handle });
+          }
+          const refused = yield* harness.coordinator.reply(LEAD, {
+            handle,
+            message: "One more",
+            waitSeconds: 0,
+          });
+          expect(refused).toMatchObject({ status: "rejected", reason: "conversation-limit" });
+          // Nor does the room start a sign-off for a conversation that has run its course.
+          yield* harness.finishTurn({
+            threadId: LEAD,
+            state: "completed",
+            answer: "Settled.",
+            turnId: LEAD_TURN,
+          });
+          yield* harness.commandWhere(
+            (command) =>
+              command.type === "thread.message.user.append" &&
+              command.message.text.includes("Settled."),
+          );
+          const signOffs = (yield* harness.recorded("thread.turn.start")).filter(
+            (command) => noteOf(command)?.purpose === "sign-off",
+          );
+          expect(signOffs).toEqual([]);
+        }),
+      ),
+    );
+
+    it.effect("brings a blocked assignee's question to the Lead and its answer back", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness();
+          const roomId = yield* harness.createRoom();
+          const assigned = yield* harness.coordinator.assign(LEAD, {
+            title: "Retry tests",
+            brief: "Add tests for the retry policy.",
+            scopeGlobs: ["src/retry/**"],
+            acceptanceCriteria: ["401 is never retried"],
+          });
+          const assigneeThread = ThreadId.make(assigned.threadId!);
+          const asked = yield* harness.coordinator.ask(assigneeThread, {
+            question: "Which base branch do the tests target?",
+          });
+          expect(asked).toMatchObject({ status: "recorded", assignment: { state: "blocked" } });
+          // The Lead is mid-turn, so the blocker waits.
+          expect(
+            (yield* harness.recorded("thread.turn.start")).filter((c) => c.threadId === LEAD),
+          ).toEqual([]);
+
+          yield* harness.finishTurn({
+            threadId: LEAD,
+            state: "completed",
+            answer: "Assigned the tests.",
+            turnId: LEAD_TURN,
+          });
+          const blocked = asTurnStart(
+            yield* harness.commandWhere(turnStartWhere((command) => command.threadId === LEAD)),
+          );
+          expect(noteOf(blocked)).toEqual({ purpose: "blocked", from: "astra", to: "fable" });
+          expect(blocked.message.text).toContain("Which base branch do the tests target?");
+          expect(blocked.message.text).toContain(`pair_reply (handle ${assigned.assignmentId})`);
+          const room = Option.getOrThrow(yield* harness.store.get(roomId));
+          expect(room.assignments[0]?.blockedDeliveredAt).toBe(blocked.createdAt);
+
+          const replied = yield* harness.coordinator.reply(LEAD, {
+            handle: assigned.assignmentId!,
+            message: "main, as of this morning.",
+          });
+          expect(replied).toMatchObject({ status: "updated", assignment: { state: "running" } });
+          const resumed = (yield* harness.recorded("thread.turn.start")).at(-1)!;
+          expect(resumed.threadId).toBe(assigneeThread);
+          expect(noteOf(resumed)).toEqual({ purpose: "reply", from: "fable", to: "astra" });
+          expect(resumed.message.text).toContain("main, as of this morning.");
+          expect(
+            Option.getOrThrow(yield* harness.store.get(roomId)).assignments[0]?.blockedDeliveredAt,
+          ).toBeNull();
         }),
       ),
     );

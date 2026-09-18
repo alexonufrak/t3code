@@ -11,6 +11,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import {
+  PAIR_CONVERSATION_MAX_EXCHANGES,
   PAIR_ROOM_CHANGED_FILES_KEPT,
   pairRoomParticipant,
   type PairAssignment,
@@ -351,9 +352,10 @@ function PairRoomDetails(props: {
           ))}
         </RadioGroup>
         <p className="text-xs text-muted-foreground">
-          {PAIR_ROOM_MODE_COPY[room.mode].description} Up to {room.maxRoundsPerTurn} consult
-          {room.maxRoundsPerTurn === 1 ? " round" : " rounds"} per{" "}
-          {lead ? `${pairPersonaName(lead.persona)} turn` : "Lead turn"}.
+          {PAIR_ROOM_MODE_COPY[room.mode].description} Up to {room.maxRoundsPerTurn}
+          {room.maxRoundsPerTurn === 1 ? " conversation" : " conversations"} with the Peer per{" "}
+          {lead ? `${pairPersonaName(lead.persona)} turn` : "Lead turn"}, each up to{" "}
+          {PAIR_CONVERSATION_MAX_EXCHANGES} exchanges.
         </p>
       </section>
 

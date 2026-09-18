@@ -27,6 +27,12 @@ export const PAIR_ROOM_LIST_MAX_ITEMS = 20;
 export const PAIR_ROOM_MAX_ROUNDS_LIMIT = 6;
 /** Settled consults older than this many are dropped from the room record. */
 export const PAIR_ROOM_SETTLED_CONSULTS_KEPT = 20;
+/**
+ * Exchanges (Peer turns) one conversation between the Lead and the Peer may
+ * run to: a consult, the replies and questions that follow it, and the
+ * sign-off after the Lead's turn. Enough to argue something out, not forever.
+ */
+export const PAIR_CONVERSATION_MAX_EXCHANGES = 8;
 /** The outgoing Lead's handoff, held on the room only until the user confirms the switch. */
 export const PAIR_ROOM_HANDOFF_MAX_LENGTH = 16000;
 /** Threads a room remembers from before its Lead switches. */
@@ -100,6 +106,12 @@ export const PairRoomNotePurpose = Schema.Literals([
   "peer-answer",
   /** A decision the user settled, brought to the Lead. */
   "decision",
+  /** The Lead's reply in a conversation, sent to the Peer or to a blocked assignee. */
+  "reply",
+  /** The Lead's final answer to the user, sent to the Peer to check before the conversation rests. */
+  "sign-off",
+  /** An assignee's blocker, brought to the Lead. */
+  "blocked",
   /**
    * A line of the other participant's conversation, appended without a turn
    * so the next turn here can catch up on it. See `PairRoomNote.source`.
@@ -156,7 +168,7 @@ export type PairConsultKind = typeof PairConsultKind.Type;
 export const PairConsultStatus = Schema.Literals(["running", "answered", "failed", "cancelled"]);
 export type PairConsultStatus = typeof PairConsultStatus.Type;
 
-export const PairConsultAnswerTo = Schema.Literals(["tool", "lead-turn"]);
+export const PairConsultAnswerTo = Schema.Literals(["tool", "lead-turn", "sign-off"]);
 export type PairConsultAnswerTo = typeof PairConsultAnswerTo.Type;
 
 export const PairConsult = Schema.Struct({
@@ -168,15 +180,25 @@ export const PairConsult = Schema.Struct({
   /** Started by the server (the pair mode review guardrail or a relayed user message) rather than the Lead. */
   automatic: Schema.Boolean,
   /**
-   * How the Lead gets the answer. "tool": from pair_consult or pair_wait.
-   * "lead-turn": the consult relays a user message, and the server starts a
-   * Lead turn with the answer once the Lead's own turn has ended.
+   * How the Peer's reply reaches the Lead. "tool": the Lead asked, so the
+   * reply returns through its waiting pair_consult, pair_reply or pair_wait,
+   * or as a Lead turn when no call takes it. "lead-turn": the consult relays
+   * a user message, and the reply is a Lead turn once the Lead's own turn has
+   * ended. "sign-off": the server sent the Lead's final answer to check; the
+   * reply is a card and a transcript line, and a Lead turn only if the Peer
+   * asked for one.
    */
   answerTo: PairConsultAnswerTo.pipe(Schema.withDecodingDefault(Effect.succeed("tool" as const))),
-  /** When a "lead-turn" answer reached the Lead, or was dropped because it no longer could. */
+  /** When the reply reached the Lead, or was dropped because it no longer could. */
   answerDeliveredAt: Schema.NullOr(IsoDateTime).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  /** The consult this one continues: the Lead's reply, or the sign-off after its turn. */
+  continues: Schema.NullOr(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  /** What the Peer asked the Lead to answer before this rests, via pair_ask. */
+  peerAsk: Schema.NullOr(PairText).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   status: PairConsultStatus,
   /** The Peer turn that answered; set when the consult settles. */
   peerTurnId: Schema.NullOr(TurnId),
@@ -249,6 +271,10 @@ export const PairAssignment = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   integrationCommit: Schema.NullOr(TrimmedNonEmptyString),
+  /** When the current blocker reached the Lead as a turn; cleared when the assignment moves on. */
+  blockedDeliveredAt: Schema.NullOr(IsoDateTime).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });

@@ -7,6 +7,7 @@ import { PairCoordinator, PairToolUnavailableError } from "../../../pair/PairCoo
 import {
   PAIR_MAX_WAIT_SECONDS,
   PairAckResult,
+  PairAskInput,
   PairAssignInput,
   PairAssignResult,
   PairConsultInput,
@@ -14,6 +15,7 @@ import {
   PairReadThreadInput,
   PairReadThreadResult,
   PairRecordDecisionInput,
+  PairReplyInput,
   PairReportProgressInput,
   PairReviewInput,
   PairStatusResult,
@@ -43,8 +45,35 @@ const PairStatusTool = Tool.make("pair_status", {
   .annotate(Tool.Idempotent, true)
   .annotate(Tool.OpenWorld, false);
 
+const PairReplyTool = Tool.make("pair_reply", {
+  description: `Pair Room, Lead: continue a conversation with the Peer, answering its question or arguing a point, or answer a blocked assignee. Pass the consultId (or assignmentId) as the handle. For a consult it waits up to waitSeconds (max ${PAIR_MAX_WAIT_SECONDS}) like pair_consult and returns the Peer's next reply, "question" if the Peer needs more from you, or "pending" with the handle for pair_wait.`,
+  parameters: PairReplyInput,
+  success: PairHandleResult,
+  failure: PairToolError,
+  dependencies,
+})
+  .annotate(Tool.Title, "Reply to the Peer")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, false)
+  .annotate(Tool.OpenWorld, false);
+
+const PairAskTool = Tool.make("pair_ask", {
+  description:
+    "Pair Room, Peer or assignee: ask the Lead something you need answered before you can finish, instead of guessing. Call it, then finish your reply and stop; the Lead's answer starts your next turn.",
+  parameters: PairAskInput,
+  success: PairAckResult,
+  failure: PairToolError,
+  dependencies,
+})
+  .annotate(Tool.Title, "Ask the Lead")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, false)
+  .annotate(Tool.OpenWorld, false);
+
 const PairConsultTool = Tool.make("pair_consult", {
-  description: `Pair Room, Lead only: ask the Peer for a critique, review, answer or independent roundtable proposal. The Peer works on a snapshot of your checkout, including uncommitted files, and cannot see your conversation. Waits up to waitSeconds (max ${PAIR_MAX_WAIT_SECONDS}); if the Peer is still working the result is status "pending" and you continue with pair_wait. A "rejected" result explains why (round limit, Peer busy, room paused).`,
+  description: `Pair Room, Lead only: open a conversation with the Peer for a critique, review, answer or independent roundtable proposal. The Peer works on a snapshot of your checkout, including uncommitted files. Waits up to waitSeconds (max ${PAIR_MAX_WAIT_SECONDS}); if the Peer is still working the result is status "pending" and you continue with pair_wait. "question" means the Peer needs your answer first: give it with pair_reply. Continue the conversation with pair_reply as long as it earns its keep. A "rejected" result explains why (round limit, Peer busy, room paused).`,
   parameters: PairConsultInput,
   success: PairHandleResult,
   failure: PairToolError,
@@ -155,6 +184,8 @@ const PairReadThreadTool = Tool.make("pair_read_thread", {
 export const PairToolkit = Toolkit.make(
   PairStatusTool,
   PairConsultTool,
+  PairReplyTool,
+  PairAskTool,
   PairWaitTool,
   PairAssignTool,
   PairReportProgressTool,

@@ -63,6 +63,7 @@ function assignment(overrides: Partial<PairAssignment>): PairAssignment {
     deviations: [],
     approvedCommit: null,
     integrationCommit: null,
+    blockedDeliveredAt: null,
     createdAt: AT,
     updatedAt: AT,
     ...overrides,

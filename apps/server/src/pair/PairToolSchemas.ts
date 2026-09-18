@@ -117,6 +117,10 @@ export const PairStatusResult = Schema.Struct({
       status: PairConsultStatus,
       title: Schema.String,
       automatic: Schema.Boolean,
+      /** Which exchange of its conversation this is; replies and sign-offs continue one. */
+      exchange: Schema.Int,
+      /** What the Peer asked the Lead to answer, if it did. */
+      peerAsk: Schema.NullOr(Schema.String),
       error: Schema.NullOr(Schema.String),
     }),
   ),
@@ -162,9 +166,22 @@ export const PairWaitInput = Schema.Struct({
 });
 
 export const PairHandleResult = Schema.Struct({
-  status: Schema.Literals(["answered", "failed", "cancelled", "pending", "rejected", "updated"]),
+  /** "question": the Peer replied but needs your answer to continue; pair_reply with the handle. */
+  status: Schema.Literals([
+    "answered",
+    "question",
+    "failed",
+    "cancelled",
+    "pending",
+    "rejected",
+    "updated",
+  ]),
   handle: Schema.NullOr(Schema.String),
   answer: Schema.NullOr(Schema.String),
+  question: Schema.NullOr(Schema.String),
+  /** Which exchange of the conversation this reply is, and how many the room allows. */
+  exchange: Schema.NullOr(Schema.Int),
+  exchangeLimit: Schema.NullOr(Schema.Int),
   leadProposal: Schema.NullOr(Schema.String),
   error: Schema.NullOr(Schema.String),
   reason: Schema.NullOr(Schema.String),
@@ -173,6 +190,24 @@ export const PairHandleResult = Schema.Struct({
   decision: Schema.NullOr(PairDecisionView),
 });
 export type PairHandleResult = typeof PairHandleResult.Type;
+
+export const PairReplyInput = Schema.Struct({
+  handle: TrimmedNonEmptyString.annotate({
+    description:
+      "The consultId whose reply you are answering, or the assignmentId of a blocked assignment.",
+  }),
+  message: LongText.annotate({
+    description:
+      "Your answer or argument. The Peer sees a refreshed snapshot of your checkout, so refer to files freely.",
+  }),
+  waitSeconds: Schema.optional(WaitSeconds),
+});
+
+export const PairAskInput = Schema.Struct({
+  question: Text.annotate({
+    description: "What you need the Lead to answer before you can finish. One question at a time.",
+  }),
+});
 
 // ── assignments ─────────────────────────────────────────────────────────
 

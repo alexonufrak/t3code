@@ -19,6 +19,8 @@ const message = (input: {
   readonly streaming?: boolean;
   readonly transcript?: boolean;
   readonly consult?: boolean;
+  /** For a transcript line, the copied message; for a sign-off prompt, the answer it carries. */
+  readonly sourceMessageId?: string;
 }): OrchestrationMessage =>
   ({
     id: MessageId.make(input.id),
@@ -38,7 +40,7 @@ const message = (input: {
             source: {
               speaker: "user",
               threadId: ThreadId.make("peer"),
-              messageId: MessageId.make(`source-${input.id}`),
+              messageId: MessageId.make(input.sourceMessageId ?? `source-${input.id}`),
               createdAt: "2026-01-01T00:00:00.000Z",
             },
           }),
@@ -47,9 +49,19 @@ const message = (input: {
     ...(input.consult
       ? {
           context: pairRoomNoteContext(`note-${input.id}`, {
-            purpose: "consult",
+            purpose: input.sourceMessageId ? "sign-off" : "consult",
             from: "fable",
             to: "astra",
+            ...(input.sourceMessageId
+              ? {
+                  source: {
+                    speaker: "agent" as const,
+                    threadId: ThreadId.make("lead"),
+                    messageId: MessageId.make(input.sourceMessageId),
+                    createdAt: "2026-01-01T00:00:00.000Z",
+                  },
+                }
+              : {}),
           }),
         }
       : {}),
@@ -130,6 +142,30 @@ describe("pairTranscriptPending", () => {
     expect(pairTranscriptPending(thread, MessageId.make("u2"))).not.toContainEqual(
       expect.objectContaining({ id: "x1" }),
     );
+  });
+
+  it("does not repeat a line the turn's own message carries", () => {
+    const messages = [
+      message({ id: "u1", role: "user", text: "Add retries" }),
+      message({ id: "x1", role: "user", text: "You → Astra: and the cap?", transcript: true }),
+      message({
+        id: "x2",
+        role: "user",
+        text: "Fable (Lead) → you: Retries are in.",
+        transcript: true,
+        sourceMessageId: "lead-answer",
+      }),
+      message({
+        id: "s1",
+        role: "user",
+        text: "sign-off prompt",
+        consult: true,
+        sourceMessageId: "lead-answer",
+      }),
+    ];
+    expect(pairTranscriptPending(messages, MessageId.make("s1")).map((line) => line.id)).toEqual([
+      "x1",
+    ]);
   });
 
   it("treats a message not in the thread yet as the end", () => {

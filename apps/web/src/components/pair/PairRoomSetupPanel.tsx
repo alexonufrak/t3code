@@ -57,7 +57,7 @@ export const defaultPairRoomDraft = (leadPersona: PairPersona = "fable"): PairRo
 
 /**
  * Chooses how a new thread becomes a Pair Room: who leads, how the two
- * collaborate, and how many consult rounds a Lead turn may use.
+ * collaborate, and how many conversations with the Peer a Lead turn may open.
  */
 export const PairRoomSetupPanel = memo(function PairRoomSetupPanel(props: {
   providers: ReadonlyArray<ServerProvider>;
@@ -170,7 +170,7 @@ export const PairRoomSetupPanel = memo(function PairRoomSetupPanel(props: {
 
       <div className="mt-3 space-y-1.5">
         <span id={roundsLabelId} className="text-xs font-medium text-foreground">
-          Consult rounds per Lead turn
+          Conversations the Lead may open per turn
         </span>
         <RadioGroup
           className="w-fit flex-row gap-0.5 rounded-lg bg-input/40 p-0.5"

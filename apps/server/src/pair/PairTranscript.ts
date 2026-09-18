@@ -129,11 +129,19 @@ export function pairTranscriptPending(
 ): ReadonlyArray<OrchestrationMessage> {
   const end = messages.findIndex((message) => message.id === turnMessageId);
   const before = end === -1 ? messages : messages.slice(0, end);
+  // A turn that carries a line itself (a sign-off with the Lead's answer) does not repeat it.
+  const carried =
+    end === -1 ? undefined : readPairRoomNote(messages[end]!.context)?.source?.messageId;
   const pending: Array<OrchestrationMessage> = [];
   for (let index = before.length - 1; index >= 0; index -= 1) {
     const message = before[index]!;
     if (isTranscriptLine(message)) {
-      pending.push(message);
+      if (
+        carried === undefined ||
+        readPairRoomNote(message.context)?.source?.messageId !== carried
+      ) {
+        pending.push(message);
+      }
     } else if (message.role === "user") {
       break;
     }

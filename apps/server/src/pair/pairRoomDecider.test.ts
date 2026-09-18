@@ -1,4 +1,5 @@
 import {
+  PAIR_CONVERSATION_MAX_EXCHANGES,
   PAIR_ROOM_SETTLED_CONSULTS_KEPT,
   PairRoomId,
   ProjectId,
@@ -11,6 +12,9 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   decidePairRoom,
   findPairRoomByThread,
+  pairConsultAnswerOwed,
+  pairExchangeIndex,
+  pairRoundsUsed,
   pairGlobMatches,
   pairScopeDeviations,
   pairScopeGlobsProblem,
@@ -78,6 +82,24 @@ const delivered = (consultId: string, at = AT): PairRoomCommand => ({
   roomId: ROOM_ID,
   consultId,
   at,
+});
+
+const failed = (consultId: string): PairRoomCommand => ({
+  type: "consult.settle",
+  roomId: ROOM_ID,
+  consultId,
+  status: "failed",
+  peerTurnId: null,
+  error: "The Peer's turn ended as error.",
+  at: AT,
+});
+
+const ask = (consultId: string, question: string): PairRoomCommand => ({
+  type: "consult.ask",
+  roomId: ROOM_ID,
+  consultId,
+  question,
+  at: AT,
 });
 
 const assign = (assignmentId: string, scopeGlobs: ReadonlyArray<string>): PairRoomCommand => ({
@@ -172,7 +194,7 @@ describe("decidePairRoom", () => {
     expect(again.consults[0]).toMatchObject({ status: "answered", error: null, settledAt: AT });
   });
 
-  it("marks a relayed answer delivered once, and only after the Peer finished", () => {
+  it("marks a reply delivered once, and only after the Peer finished", () => {
     const rooms = createRoom("roundtable");
     apply(rooms, consult("relay", { automatic: true, answerTo: "lead-turn", leadTurnId: null }));
     expect(apply(rooms, delivered("relay")).consults[0]?.answerDeliveredAt).toBeNull();
@@ -181,12 +203,67 @@ describe("decidePairRoom", () => {
     const later = "2026-09-17T11:00:00.000Z";
     expect(apply(rooms, delivered("relay", later)).consults[0]?.answerDeliveredAt).toBe(AT);
 
+    // A consult the Lead opened is owed to it the same way, until a tool call or a turn takes it.
     apply(rooms, consult("tool"));
+    expect(pairConsultAnswerOwed(rooms.get(ROOM_ID)!.consults[1]!)).toBe(false);
     apply(rooms, settle("tool"));
+    expect(pairConsultAnswerOwed(rooms.get(ROOM_ID)!.consults[1]!)).toBe(true);
     expect(apply(rooms, delivered("tool")).consults[1]).toMatchObject({
       answerTo: "tool",
-      answerDeliveredAt: null,
+      answerDeliveredAt: AT,
+      continues: null,
+      peerAsk: null,
     });
+  });
+
+  it("owes the Lead a failed relay but not a failed consult, and a sign-off only when the Peer asked", () => {
+    const rooms = createRoom();
+    apply(rooms, consult("relay", { automatic: true, answerTo: "lead-turn", leadTurnId: null }));
+    apply(rooms, failed("relay"));
+    expect(pairConsultAnswerOwed(rooms.get(ROOM_ID)!.consults[0]!)).toBe(true);
+    apply(rooms, delivered("relay"));
+
+    apply(rooms, consult("tool"));
+    apply(rooms, failed("tool"));
+    expect(pairConsultAnswerOwed(rooms.get(ROOM_ID)!.consults[1]!)).toBe(false);
+
+    apply(rooms, consult("quiet", { automatic: true, answerTo: "sign-off", continues: "tool" }));
+    apply(rooms, settle("quiet"));
+    expect(pairConsultAnswerOwed(rooms.get(ROOM_ID)!.consults[2]!)).toBe(false);
+
+    apply(rooms, consult("loud", { automatic: true, answerTo: "sign-off", continues: "quiet" }));
+    apply(rooms, ask("loud", "Did you mean to drop the retry cap?"));
+    apply(rooms, settle("loud"));
+    expect(rooms.get(ROOM_ID)!.consults[3]).toMatchObject({
+      peerAsk: "Did you mean to drop the retry cap?",
+    });
+    expect(pairConsultAnswerOwed(rooms.get(ROOM_ID)!.consults[3]!)).toBe(true);
+    expect(rejectionOf(rooms, ask("loud", "again")).reason).toBe("invalid");
+  });
+
+  it("threads replies and sign-offs into one conversation that stops at its exchange limit", () => {
+    const rooms = createRoom();
+    apply(rooms, consult("c1"));
+    apply(rooms, settle("c1"));
+    // Replies are not rounds: the room still allows the second conversation of the turn.
+    let previous = "c1";
+    for (let index = 2; index <= PAIR_CONVERSATION_MAX_EXCHANGES; index += 1) {
+      const id = `c${index}`;
+      const room = apply(rooms, consult(id, { continues: previous }));
+      expect(room.consults.at(-1)).toMatchObject({ continues: previous, round: 1 });
+      expect(pairExchangeIndex(room, id)).toBe(index);
+      apply(rooms, settle(id));
+      previous = id;
+    }
+    expect(pairRoundsUsed(rooms.get(ROOM_ID)!, TURN_1)).toBe(1);
+    expect(rejectionOf(rooms, consult("too-many", { continues: previous })).reason).toBe(
+      "conversation-limit",
+    );
+    expect(rejectionOf(rooms, consult("gone", { continues: "never-existed" })).reason).toBe(
+      "not-found",
+    );
+    apply(rooms, consult("c-open"));
+    expect(rejectionOf(rooms, consult("early", { continues: "c-open" })).reason).toBe("peer-busy");
   });
 
   it("keeps an answer still owed to the Lead however many consults settle after it", () => {
@@ -196,6 +273,7 @@ describe("decidePairRoom", () => {
     for (let index = 0; index < PAIR_ROOM_SETTLED_CONSULTS_KEPT + 2; index += 1) {
       apply(rooms, consult(`c${index}`, { automatic: true }));
       apply(rooms, settle(`c${index}`));
+      apply(rooms, delivered(`c${index}`));
     }
     expect(rooms.get(ROOM_ID)?.consults[0]?.consultId).toBe("relay");
     const trimmed = apply(rooms, delivered("relay"));
@@ -207,11 +285,42 @@ describe("decidePairRoom", () => {
     for (let index = 0; index < PAIR_ROOM_SETTLED_CONSULTS_KEPT + 5; index += 1) {
       apply(rooms, consult(`c${index}`, { automatic: true }));
       apply(rooms, settle(`c${index}`));
+      apply(rooms, delivered(`c${index}`));
     }
     const room = apply(rooms, consult("running", { automatic: true }));
     expect(room.consults).toHaveLength(PAIR_ROOM_SETTLED_CONSULTS_KEPT + 1);
     expect(room.consults[0]?.consultId).toBe("c5");
     expect(room.consults.at(-1)?.status).toBe("running");
+  });
+
+  it("brings a blocker to the Lead once per block", () => {
+    const rooms = createRoom();
+    apply(rooms, {
+      type: "peer.attach",
+      roomId: ROOM_ID,
+      threadId: ThreadId.make("peer-thread"),
+      reviewWorktreePath: "/worktrees/review",
+      at: AT,
+    });
+    apply(rooms, assign("a1", ["src/**"]));
+    const update = (
+      state: "blocked" | "running",
+      blockedDeliveredAt?: string,
+    ): PairRoomCommand => ({
+      type: "assignment.update",
+      roomId: ROOM_ID,
+      assignmentId: "a1",
+      by: "server",
+      state,
+      ...(blockedDeliveredAt ? { blockedDeliveredAt } : {}),
+      at: AT,
+    });
+    expect(apply(rooms, update("blocked")).assignments[0]?.blockedDeliveredAt).toBeNull();
+    expect(apply(rooms, update("blocked", AT)).assignments[0]?.blockedDeliveredAt).toBe(AT);
+    // Staying blocked keeps the delivery; moving on clears it for the next block.
+    expect(apply(rooms, update("blocked")).assignments[0]?.blockedDeliveredAt).toBe(AT);
+    expect(apply(rooms, update("running")).assignments[0]?.blockedDeliveredAt).toBeNull();
+    expect(apply(rooms, update("blocked")).assignments[0]?.blockedDeliveredAt).toBeNull();
   });
 
   it("blocks new work while paused and resumes on the user's word", () => {
