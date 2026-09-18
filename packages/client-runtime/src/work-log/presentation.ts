@@ -83,6 +83,7 @@ const T3_MCP_TOOL_LABELS: Record<
   pair_submit: ["Submit", "Submitting", "Submitted", "the assignment"],
   pair_review: ["Review", "Reviewing", "Reviewed", "an assignment"],
   pair_record_decision: ["Record", "Recording", "Recorded", "a pair decision"],
+  pair_read_thread: ["Read", "Reading", "Read", "the other pair thread"],
   link_pull_request: ["Link", "Linking", "Linked", "a pull request"],
   unlink_pull_request: ["Unlink", "Unlinking", "Unlinked", "a pull request"],
   list_thread_pull_requests: ["Check", "Checking", "Checked", "linked pull requests"],

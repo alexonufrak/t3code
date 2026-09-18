@@ -13,11 +13,13 @@ import {
   pairRoomParticipant,
   type OrchestrationCommand,
   type OrchestrationEvent,
+  type OrchestrationMessage,
   type OrchestrationThreadShell,
   type PairAssignment,
   type PairConsult,
   type PairConsultKind,
   type PairDecision,
+  type PairParticipant,
   type PairPersona,
   type PairRoom,
   type PairRoomDispatchResult,
@@ -63,14 +65,26 @@ import { PairRoomRejectedError, PairRoomStore } from "./PairRoomStore.ts";
 import {
   PAIR_DEFAULT_WAIT_SECONDS,
   PAIR_MAX_WAIT_SECONDS,
+  PAIR_READ_THREAD_DEFAULT_LIMIT,
   type PairAckResult,
   type PairAssignResult,
   type PairAssignmentView,
   type PairCallerRole,
   type PairDecisionView,
   type PairHandleResult,
+  type PairReadThreadResult,
   type PairStatusResult,
 } from "./PairToolSchemas.ts";
+import {
+  PAIR_TRANSCRIPT_BOOTSTRAP_MESSAGES,
+  PAIR_TRANSCRIPT_LINE_MAX_LENGTH,
+  pairFinalAnswer,
+  pairTranscriptFilesLine,
+  pairTranscriptKey,
+  pairTranscriptLine,
+  pairTranscriptSources,
+  pairTranscriptStoppedLine,
+} from "./PairTranscript.ts";
 import { PairWorkspace, type PairWorkspaceError } from "./PairWorkspace.ts";
 import {
   clampPairText,
@@ -183,6 +197,14 @@ export class PairCoordinator extends Context.Service<
         readonly waitSeconds?: number | undefined;
       },
     ) => ToolEffect<PairAckResult>;
+    readonly readThread: (
+      threadId: ThreadId,
+      input: {
+        readonly persona?: PairPersona | undefined;
+        readonly beforeMessageId?: string | undefined;
+        readonly limit?: number | undefined;
+      },
+    ) => ToolEffect<PairReadThreadResult>;
   }
 >()("t3/pair/PairCoordinator") {}
 
@@ -232,6 +254,9 @@ const modelSelectionFor = (persona: PairPersona) => ({
   instanceId: PAIR_PERSONAS[persona].instanceId,
   model: PAIR_PERSONAS[persona].model,
 });
+
+/** How far back each participant thread is re-copied after a restart. */
+const PAIR_TRANSCRIPT_RECONCILE_MESSAGES = 6;
 
 const isRunningTurn = (shell: OrchestrationThreadShell) =>
   shell.session?.activeTurnId != null || shell.latestTurn?.state === "running";
@@ -511,6 +536,255 @@ export const make = Effect.gen(function* () {
       });
     });
 
+  // ── Transcript ──────────────────────────────────────────────────────
+
+  /**
+   * Strictly increasing timestamps for the lines the room appends: threads
+   * order messages by createdAt first, and several lines can land within one
+   * millisecond. Turns the room starts after appending use it too, so they
+   * sort after the catch-up they follow.
+   */
+  let lastAppendedMs = 0;
+  const nextIso = DateTime.now.pipe(
+    Effect.map((now) => {
+      lastAppendedMs = Math.max(DateTime.toEpochMillis(now), lastAppendedMs + 1);
+      return DateTime.formatIso(DateTime.makeUnsafe(lastAppendedMs));
+    }),
+  );
+
+  const otherParticipant = (room: PairRoom, participant: PairParticipant) =>
+    room.participants.find((entry) => entry.persona !== participant.persona);
+
+  const readMessages = (threadId: ThreadId) =>
+    snapshots.getThreadDetailById(threadId).pipe(
+      Effect.map((detail) => Option.getOrUndefined(detail)?.messages ?? []),
+      Effect.mapError(internal("read transcript")),
+    );
+
+  /**
+   * Lines the other participant already received another way: a user message
+   * the room relayed as the Peer's prompt, and a Peer answer that went back
+   * through the Lead's tool call or a Lead turn.
+   */
+  const deliveredInBand = (
+    room: PairRoom,
+    source: PairParticipant,
+    message: OrchestrationMessage,
+  ) =>
+    message.role === "user"
+      ? source.role === "lead" &&
+        room.consults.some(
+          (consult) =>
+            consult.answerTo === "lead-turn" && consult.requestedAt === message.createdAt,
+        )
+      : source.role === "peer" &&
+        room.consults.some(
+          (consult) =>
+            consult.peerTurnId === message.turnId &&
+            (consult.answerTo === "lead-turn" || !consult.automatic),
+        );
+
+  /**
+   * Appends one transcript line to `target`'s thread without starting a turn.
+   * The ids derive from the line, so a replay after a restart is a no-op, and
+   * a line that fails to land never fails the turn that produced it.
+   */
+  const appendLine = (input: {
+    readonly room: PairRoom;
+    readonly from: PairParticipant;
+    readonly target: PairParticipant;
+    readonly key: string;
+    readonly text: string;
+    readonly source: PairRoomNote["source"];
+  }) =>
+    Effect.gen(function* () {
+      if (!input.target.threadId) return;
+      const key = pairTranscriptKey(input.target.threadId, input.key);
+      yield* orchestrate({
+        type: "thread.message.user.append",
+        commandId: CommandId.make(`pair:transcript:${key}`),
+        threadId: input.target.threadId,
+        message: {
+          messageId: MessageId.make(`pair-transcript-${key}`),
+          text: input.text,
+          attachments: [],
+          context: pairRoomNoteContext(`pair-room-note-transcript-${key}`, {
+            purpose: "transcript",
+            from: input.from.persona,
+            to: input.target.persona,
+            ...(input.source ? { source: input.source } : {}),
+          }),
+        },
+        createdAt: yield* nextIso,
+      });
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("pair transcript line failed", { key: input.key, cause }),
+      ),
+    );
+
+  const copyMessage = (
+    room: PairRoom,
+    from: PairParticipant,
+    target: PairParticipant,
+    line: { readonly speaker: "user" | "agent"; readonly message: OrchestrationMessage },
+  ) =>
+    appendLine({
+      room,
+      from,
+      target,
+      key: line.message.id,
+      text: pairTranscriptLine({
+        speaker: line.speaker,
+        persona: from.persona,
+        role: from.role,
+        text: line.message.text,
+        attachments: line.message.attachments,
+      }),
+      source: {
+        speaker: line.speaker,
+        threadId: from.threadId!,
+        messageId: line.message.id,
+        createdAt: line.message.createdAt,
+      },
+    });
+
+  /** Copies the last `limit` lines of `from`'s thread that the other participant has not seen. */
+  const copyRecent = (
+    room: PairRoom,
+    from: PairParticipant,
+    target: PairParticipant,
+    limit: number,
+  ) =>
+    Effect.gen(function* () {
+      if (!from.threadId || !target.threadId) return;
+      const sources = pairTranscriptSources(yield* readMessages(from.threadId)).filter(
+        (line) => !deliveredInBand(room, from, line.message),
+      );
+      for (const line of sources.slice(-limit)) {
+        yield* copyMessage(room, from, target, line);
+      }
+    }).pipe(
+      Effect.catchCause((cause) => Effect.logWarning("pair transcript catch-up failed", { cause })),
+    );
+
+  /** A message the user typed in a participant's thread goes to the other participant, unless it was relayed. */
+  const copyUserMessage = (room: PairRoom, threadId: ThreadId, messageId: MessageId) =>
+    Effect.gen(function* () {
+      const from = room.participants.find((entry) => entry.threadId === threadId);
+      const target = from && otherParticipant(room, from);
+      if (!from || !target?.threadId) return;
+      const message = (yield* readMessages(threadId)).find((entry) => entry.id === messageId);
+      if (
+        message?.role !== "user" ||
+        readPairRoomNote(message.context) !== null ||
+        deliveredInBand(room, from, message)
+      ) {
+        return;
+      }
+      yield* copyMessage(room, from, target, { speaker: "user", message });
+    }).pipe(
+      Effect.catchCause((cause) => Effect.logWarning("pair transcript copy failed", { cause })),
+    );
+
+  /** Each thread's latest turn is copied once when it ends; command ids catch the rest. */
+  const copiedTurns = new Map<ThreadId, TurnId>();
+
+  /** A participant's final answer, or the fact that its turn stopped short, goes to the other participant. */
+  const copyTurnEnd = (room: PairRoom, threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const from = room.participants.find((entry) => entry.threadId === threadId);
+      const target = from && otherParticipant(room, from);
+      if (!from || !target?.threadId) return;
+      const shell = Option.getOrUndefined(yield* threadShell(threadId));
+      const turn = shell?.latestTurn;
+      if (!shell || !turn || isRunningTurn(shell) || copiedTurns.get(threadId) === turn.turnId) {
+        return;
+      }
+      copiedTurns.set(threadId, turn.turnId);
+      const inBand = room.consults.some((consult) => consult.peerTurnId === turn.turnId);
+      const answer = pairFinalAnswer(yield* readMessages(threadId), turn.turnId);
+      if (answer) {
+        if (deliveredInBand(room, from, answer)) return;
+        yield* copyMessage(room, from, target, { speaker: "agent", message: answer });
+      } else if (turn.state !== "completed" && !(from.role === "peer" && inBand)) {
+        yield* appendLine({
+          room,
+          from,
+          target,
+          key: `stopped-${turn.turnId}`,
+          text: pairTranscriptStoppedLine(from.persona),
+          source: undefined,
+        });
+      }
+    }).pipe(
+      Effect.catchCause((cause) => Effect.logWarning("pair transcript copy failed", { cause })),
+    );
+
+  const copyTurnFiles = (
+    room: PairRoom,
+    event: Extract<OrchestrationEvent, { type: "thread.turn-diff-completed" }>,
+  ) =>
+    Effect.gen(function* () {
+      const from = room.participants.find((entry) => entry.threadId === event.payload.threadId);
+      const target = from && otherParticipant(room, from);
+      if (!from || !target?.threadId || event.payload.files.length === 0) return;
+      // A consult's edits are discarded with the snapshot, so they are not worth a line.
+      if (room.consults.some((consult) => consult.peerTurnId === event.payload.turnId)) return;
+      yield* appendLine({
+        room,
+        from,
+        target,
+        key: `files-${event.payload.turnId}`,
+        text: pairTranscriptFilesLine(
+          from.persona,
+          from.role,
+          event.payload.files.map((file) => file.path),
+        ),
+        source: undefined,
+      });
+    });
+
+  const readThread: PairCoordinator["Service"]["readThread"] = (threadId, input) =>
+    toolEdge(
+      Effect.gen(function* () {
+        const caller = yield* resolveCaller(threadId);
+        const persona = input.persona ?? otherPairPersona(caller.persona);
+        const target = caller.room.participants.find((entry) => entry.persona === persona);
+        const empty = (detail: string): PairReadThreadResult => ({
+          persona,
+          detail,
+          lines: [],
+          hasMore: false,
+        });
+        if (!target?.threadId) {
+          return empty(`${personaName(persona)} has no thread in this room yet.`);
+        }
+        const sources = pairTranscriptSources(yield* readMessages(target.threadId));
+        const before = input.beforeMessageId
+          ? sources.findIndex((line) => line.message.id === input.beforeMessageId)
+          : -1;
+        const end = before === -1 ? sources.length : before;
+        const start = Math.max(0, end - (input.limit ?? PAIR_READ_THREAD_DEFAULT_LIMIT));
+        const lines = sources.slice(start, end).map((line) => ({
+          messageId: line.message.id,
+          at: line.message.createdAt,
+          speaker: line.speaker,
+          text: clampPairText(line.message.text, PAIR_TRANSCRIPT_LINE_MAX_LENGTH),
+        }));
+        return {
+          persona,
+          detail:
+            lines.length === 0
+              ? `Nothing ${before === -1 ? "said" : "earlier"} in ${personaName(persona)}'s thread.`
+              : `${lines.length} line${lines.length === 1 ? "" : "s"} from ${personaName(persona)}'s thread, newest last.`,
+          lines,
+          hasMore: start > 0,
+        } satisfies PairReadThreadResult;
+      }),
+      (error) => Effect.fail(new PairToolUnavailableError({ detail: error.detail })),
+    );
+
   // ── Consults ────────────────────────────────────────────────────────
 
   /**
@@ -672,6 +946,13 @@ export const make = Effect.gen(function* () {
         reviewWorktreePath: review.worktreePath,
         at: createdAt,
       });
+      // A fresh Peer starts from where the Lead's conversation already is.
+      yield* copyRecent(
+        attached,
+        pairRoomParticipant(attached, "lead")!,
+        pairRoomParticipant(attached, "peer")!,
+        PAIR_TRANSCRIPT_BOOTSTRAP_MESSAGES,
+      );
       return { room: attached, peerThreadId, snapshotCommit: review.snapshotCommit };
     });
 
@@ -712,7 +993,7 @@ export const make = Effect.gen(function* () {
           from: lead.persona,
           to: peerPersona,
         },
-        createdAt: consult.requestedAt,
+        createdAt: yield* nextIso,
       });
     }).pipe(
       Effect.catch((error: PairFailure) =>
@@ -1973,7 +2254,7 @@ export const make = Effect.gen(function* () {
           summary: `${personaName(peer.persona)} is still busy`,
           payload: pairMirrorCompletedPayload(card, {
             status: "failed",
-            error: `${personaName(peer.persona)} was still answering an earlier request, so only ${personaName(lead.persona)} got this message.`,
+            error: `${personaName(peer.persona)} was still answering an earlier request, so ${personaName(lead.persona)} answers this one alone. ${personaName(peer.persona)} sees it at its next turn.`,
           }),
           turnId: null,
         });
@@ -2296,6 +2577,9 @@ export const make = Effect.gen(function* () {
       }
       if (event.type === "thread.turn-start-requested") {
         yield* relayUserMessage(found.value, event);
+        // Relayed messages reach the Peer as its prompt; the rest are copied.
+        const room = Option.getOrElse(yield* store.get(found.value.roomId), () => found.value);
+        yield* copyUserMessage(room, threadId, event.payload.messageId);
         return;
       }
       yield* settleIfAnswered(found.value, threadId);
@@ -2304,9 +2588,11 @@ export const make = Effect.gen(function* () {
         const room = Option.getOrElse(yield* store.get(found.value.roomId), () => found.value);
         yield* reviewGuardrail(room, event);
         yield* scopeCheck(room, threadId);
+        yield* copyTurnFiles(room, event);
       }
       if (event.type === "thread.session-set" || event.type === "thread.turn-diff-completed") {
         const room = Option.getOrElse(yield* store.get(found.value.roomId), () => found.value);
+        yield* copyTurnEnd(room, threadId);
         yield* flagUnsubmittedTurn(room, threadId);
         const settled = Option.getOrElse(yield* store.get(found.value.roomId), () => room);
         yield* deliverPeerAnswer(settled);
@@ -2376,6 +2662,15 @@ export const make = Effect.gen(function* () {
       }
       yield* deliverPeerAnswer(Option.getOrElse(yield* store.get(room.roomId), () => room));
       yield* deliverDecision(Option.getOrElse(yield* store.get(room.roomId), () => room));
+      // Lines that ended up between a turn's end and the restart are copied now; the rest replay as no-ops.
+      const settled = Option.getOrElse(yield* store.get(room.roomId), () => room);
+      if (settled.status !== "closed") {
+        for (const participant of settled.participants) {
+          const other = otherParticipant(settled, participant);
+          if (other)
+            yield* copyRecent(settled, participant, other, PAIR_TRANSCRIPT_RECONCILE_MESSAGES);
+        }
+      }
       for (const assignment of room.assignments) {
         if (assignment.state !== "running") continue;
         const current = Option.getOrElse(yield* store.get(room.roomId), () => room);
@@ -2414,6 +2709,7 @@ export const make = Effect.gen(function* () {
     submit,
     review,
     recordDecision,
+    readThread,
   });
 });
 

@@ -104,6 +104,7 @@ import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
 import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as PairCoordinator from "./pair/PairCoordinator.ts";
 import * as PairRoomStore from "./pair/PairRoomStore.ts";
+import * as PairTranscript from "./pair/PairTranscript.ts";
 import * as PairWorkspace from "./pair/PairWorkspace.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
@@ -254,6 +255,8 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(PairCoordinatorLayerLive),
   Layer.provideMerge(ProviderRuntimeIngestionLive),
   Layer.provideMerge(ProviderCommandReactorLive),
+  // Below the reactor so its turn prompts can open with a Pair Room catch-up.
+  Layer.provideMerge(PairTranscript.layer),
   Layer.provideMerge(CheckpointReactorLive),
   Layer.provideMerge(StorageCleanup.layer),
   Layer.provideMerge(ThreadDeletionReactorLive),

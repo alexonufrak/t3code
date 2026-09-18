@@ -11,6 +11,8 @@ import {
   PairAssignResult,
   PairConsultInput,
   PairHandleResult,
+  PairReadThreadInput,
+  PairReadThreadResult,
   PairRecordDecisionInput,
   PairReportProgressInput,
   PairReviewInput,
@@ -136,6 +138,20 @@ const PairRecordDecisionTool = Tool.make("pair_record_decision", {
   .annotate(Tool.Idempotent, false)
   .annotate(Tool.OpenWorld, false);
 
+const PairReadThreadTool = Tool.make("pair_read_thread", {
+  description:
+    "Pair Room, any member: read what the user and the other participant said in that participant's thread, newest last. Recent lines already open each of your turns as a catch-up; use this for lines the catch-up omitted or to page further back with beforeMessageId.",
+  parameters: PairReadThreadInput,
+  success: PairReadThreadResult,
+  failure: PairToolError,
+  dependencies,
+})
+  .annotate(Tool.Title, "Read the other thread")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true)
+  .annotate(Tool.OpenWorld, false);
+
 export const PairToolkit = Toolkit.make(
   PairStatusTool,
   PairConsultTool,
@@ -145,4 +161,5 @@ export const PairToolkit = Toolkit.make(
   PairSubmitTool,
   PairReviewTool,
   PairRecordDecisionTool,
+  PairReadThreadTool,
 );

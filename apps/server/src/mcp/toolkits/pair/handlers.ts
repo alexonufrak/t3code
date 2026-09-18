@@ -30,6 +30,8 @@ const make = Effect.gen(function* () {
       caller.pipe(Effect.flatMap((threadId) => coordinator.review(threadId, input))),
     pair_record_decision: (input) =>
       caller.pipe(Effect.flatMap((threadId) => coordinator.recordDecision(threadId, input))),
+    pair_read_thread: (input) =>
+      caller.pipe(Effect.flatMap((threadId) => coordinator.readThread(threadId, input))),
   });
 });
 

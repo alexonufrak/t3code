@@ -32,9 +32,11 @@ import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import * as PairCoordinator from "./PairCoordinator.ts";
 import * as PairRoomStore from "./PairRoomStore.ts";
+import { pairTranscriptKey } from "./PairTranscript.ts";
 import { PairWorkspace, PairWorkspaceError, type PairIntegrationResult } from "./PairWorkspace.ts";
 
 const PROJECT_ID = ProjectId.make("project-1");
+const MESSAGE_AT = "1970-01-01T00:00:00.000Z";
 const LEAD = ThreadId.make("lead-thread");
 const LEAD_TURN = TurnId.make("lead-turn-1");
 const REVIEW_WORKTREE = "/worktrees/repo/pair-review-room";
@@ -110,14 +112,20 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
     void,
     PairRoomStore.PairRoomRejectedError | PairRoomStore.PairRoomPersistenceError
   >;
+  /** Thread messages already on disk when the coordinator starts. */
+  readonly messages?: ReadonlyMap<ThreadId, OrchestrationThread["messages"]>;
 }) {
   const commands = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+  // The engine answers a repeated command id with its first receipt; so does this.
+  const receipts = new Set<string>();
   const shells = yield* Ref.make(
     new Map<ThreadId, OrchestrationThreadShell>([
       [LEAD, makeShell({ id: LEAD, session: runningSession(LEAD, LEAD_TURN) })],
     ]),
   );
-  const messages = yield* Ref.make(new Map<ThreadId, OrchestrationThread["messages"]>());
+  const messages = yield* Ref.make(
+    new Map<ThreadId, OrchestrationThread["messages"]>(options?.messages ?? []),
+  );
   const domainEvents = yield* PubSub.unbounded<OrchestrationEvent>();
   // Every dispatched command, replayed so a test can wait on one that already landed.
   const dispatched = yield* PubSub.unbounded<OrchestrationCommand>({ replay: 64 });
@@ -135,6 +143,8 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
       readEvents: () => Stream.empty,
       dispatch: (command) =>
         Effect.gen(function* () {
+          if (receipts.has(command.commandId)) return { sequence: 1 };
+          receipts.add(command.commandId);
           yield* Ref.update(commands, (all) => [...all, command]);
           yield* PubSub.publish(dispatched, command);
           if (command.type === "thread.create") {
@@ -149,6 +159,24 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
                   worktreePath: command.worktreePath,
                 }),
               ),
+            );
+          }
+          if (command.type === "thread.message.user.append") {
+            yield* Ref.update(messages, (all) =>
+              new Map(all).set(command.threadId, [
+                ...(all.get(command.threadId) ?? []),
+                {
+                  id: command.message.messageId,
+                  role: "user",
+                  text: command.message.text,
+                  attachments: command.message.attachments,
+                  context: command.message.context,
+                  turnId: null,
+                  streaming: false,
+                  createdAt: command.createdAt,
+                  updatedAt: command.createdAt,
+                },
+              ] as unknown as OrchestrationThread["messages"]),
             );
           }
           return { sequence: 1 };
@@ -238,27 +266,40 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
   /** Simulates the provider finishing the latest turn on `threadId`, then lands its event. */
   const finishTurn = Effect.fn("finishTurn")(function* (input: {
     readonly threadId: ThreadId;
-    readonly state: "completed" | "error";
+    readonly state: "completed" | "error" | "interrupted";
     readonly answer?: string;
+    /** Defaults to the turn the latest `thread.turn.start` on the thread began. */
+    readonly turnId?: TurnId;
   }) {
     const turnStart = (yield* recorded("thread.turn.start")).findLast(
       (command) => command.threadId === input.threadId,
-    )!;
-    const turnId = TurnId.make(`turn-for-${turnStart.commandId}`);
+    );
+    const turnId = input.turnId ?? TurnId.make(`turn-for-${turnStart!.commandId}`);
+    const requestedAt = turnStart?.createdAt ?? MESSAGE_AT;
     yield* setShell(input.threadId, {
+      session: runningSession(input.threadId, null),
       latestTurn: {
         turnId,
         state: input.state,
-        requestedAt: turnStart.createdAt,
-        startedAt: turnStart.createdAt,
-        completedAt: turnStart.createdAt,
+        requestedAt,
+        startedAt: requestedAt,
+        completedAt: requestedAt,
         assistantMessageId: null,
       },
     });
     if (input.answer) {
       yield* Ref.update(messages, (all) =>
         new Map(all).set(input.threadId, [
-          { role: "assistant", text: input.answer, turnId, streaming: false },
+          ...(all.get(input.threadId) ?? []),
+          {
+            id: MessageId.make(`answer-${turnId}`),
+            role: "assistant",
+            text: input.answer,
+            turnId,
+            streaming: false,
+            createdAt: requestedAt,
+            updatedAt: requestedAt,
+          },
         ] as unknown as OrchestrationThread["messages"]),
       );
     }
@@ -275,17 +316,19 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
     );
 
   let userMessages = 0;
-  /** Lands a message the user typed on the Lead's thread, as the turn it starts announces it. */
+  /** Lands a message the user typed on a participant's thread (the Lead's by default), as the turn it starts announces it. */
   const sendUserMessage = Effect.fn("sendUserMessage")(function* (input: {
     readonly text: string;
     readonly createdAt: string;
     readonly context?: OrchestrationMessageContext;
+    readonly threadId?: ThreadId;
   }) {
     userMessages += 1;
+    const threadId = input.threadId ?? LEAD;
     const messageId = MessageId.make(`user-message-${userMessages}`);
     yield* Ref.update(messages, (all) =>
-      new Map(all).set(LEAD, [
-        ...(all.get(LEAD) ?? []),
+      new Map(all).set(threadId, [
+        ...(all.get(threadId) ?? []),
         {
           id: messageId,
           role: "user",
@@ -300,8 +343,12 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
     );
     yield* PubSub.publish(
       domainEvents,
-      threadEvent("thread.turn-start-requested", LEAD, { messageId, createdAt: input.createdAt }),
+      threadEvent("thread.turn-start-requested", threadId, {
+        messageId,
+        createdAt: input.createdAt,
+      }),
     );
+    return messageId;
   });
 
   const createRoom = (mode: "adaptive" | "pair" | "roundtable" = "adaptive") =>
@@ -342,8 +389,6 @@ const peerThreadOf = (store: PairRoomStore.PairRoomStore["Service"], roomId: Pai
           Option.getOrThrow(room).participants.find((entry) => entry.role === "peer")!.threadId!,
       ),
     );
-
-const MESSAGE_AT = "1970-01-01T00:00:00.000Z";
 
 const turnStartWhere =
   (predicate: (command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>) => boolean) =>
@@ -519,7 +564,7 @@ describe("PairCoordinator", () => {
           expect(
             (skipped as Extract<OrchestrationCommand, { type: "thread.activity.append" }>).activity
               .payload,
-          ).toMatchObject({ summary: expect.stringContaining("only Fable got this message") });
+          ).toMatchObject({ summary: expect.stringContaining("Fable answers this one alone") });
         }),
       ),
   );
@@ -1120,4 +1165,308 @@ describe("PairCoordinator", () => {
       }),
     ),
   );
+
+  describe("transcript", () => {
+    const appendsTo = (
+      harness: Effect.Success<ReturnType<typeof makeHarness>>,
+      threadId: ThreadId,
+    ) =>
+      harness.recorded("thread.message.user.append").pipe(
+        Effect.map((commands) =>
+          commands
+            .filter((command) => command.threadId === threadId)
+            .map((command) => ({
+              text: command.message.text,
+              note: readPairRoomNote(command.message.context),
+              createdAt: command.createdAt,
+            })),
+        ),
+      );
+
+    it.effect(
+      "catches a new Peer up on the Lead's thread, then copies what each side says without starting turns",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const harness = yield* makeHarness();
+            const roomId = yield* harness.createRoom();
+            // No Peer thread yet, so this message has nowhere to go until the Peer exists.
+            const first = yield* harness.sendUserMessage({
+              text: "Let's add retries",
+              createdAt: "1970-01-01T00:00:01.000Z",
+            });
+            expect(yield* harness.recorded("thread.message.user.append")).toEqual([]);
+
+            const consult = yield* harness.coordinator.consult(LEAD, {
+              question: "Is exponential backoff enough?",
+              waitSeconds: 0,
+            });
+            expect(consult.status).toBe("pending");
+            const peerThreadId = yield* peerThreadOf(harness.store, roomId);
+            const bootstrap = yield* appendsTo(harness, peerThreadId);
+            expect(bootstrap).toEqual([
+              {
+                text: "You → Fable: Let's add retries",
+                note: {
+                  purpose: "transcript",
+                  from: "fable",
+                  to: "astra",
+                  source: {
+                    speaker: "user",
+                    threadId: LEAD,
+                    messageId: first,
+                    createdAt: "1970-01-01T00:00:01.000Z",
+                  },
+                },
+                createdAt: expect.any(String),
+              },
+            ]);
+            // The consult's prompt sorts after the catch-up it follows.
+            const consultTurn = (yield* harness.recorded("thread.turn.start")).at(-1)!;
+            expect(consultTurn.threadId).toBe(peerThreadId);
+            expect(consultTurn.createdAt > bootstrap[0]!.createdAt).toBe(true);
+
+            yield* harness.finishTurn({
+              threadId: peerThreadId,
+              state: "completed",
+              answer: "Add jitter too.",
+            });
+            yield* harness.roomWhere((room) => room.consults[0]?.status === "answered");
+
+            // The Lead's final answer and its changed files reach the Peer.
+            yield* harness.finishTurn({
+              threadId: LEAD,
+              state: "completed",
+              answer: "Retries with full jitter are in.",
+              turnId: LEAD_TURN,
+            });
+            yield* harness.commandWhere(
+              (command) =>
+                command.type === "thread.message.user.append" &&
+                command.message.text.includes("Retries with full jitter"),
+            );
+            yield* PubSub.publish(
+              harness.domainEvents,
+              threadEvent("thread.turn-diff-completed", LEAD, {
+                turnId: LEAD_TURN,
+                files: [{ path: "src/retry.ts" }, { path: "src/retry.test.ts" }],
+              }),
+            );
+            yield* harness.commandWhere(
+              (command) =>
+                command.type === "thread.message.user.append" &&
+                command.message.text.startsWith("Fable changed"),
+            );
+            // Events are handled in order, so the Peer's turn end was fully handled by now:
+            // its answer returned through the Lead's tool call and was not copied.
+            expect(yield* appendsTo(harness, LEAD)).toEqual([]);
+            const copied = yield* appendsTo(harness, peerThreadId);
+            expect(copied.map((entry) => entry.text)).toEqual([
+              "You → Fable: Let's add retries",
+              "Fable (Lead) → you: Retries with full jitter are in.",
+              "Fable changed: src/retry.ts, src/retry.test.ts",
+            ]);
+            expect(copied[1]!.note?.source?.speaker).toBe("agent");
+            expect(copied[2]!.note).toEqual({ purpose: "transcript", from: "fable", to: "astra" });
+            // Every copy lands strictly after the one before, whatever the clock says.
+            expect(copied.map((entry) => entry.createdAt)).toEqual(
+              copied.map((entry) => entry.createdAt).toSorted(),
+            );
+            expect(new Set(copied.map((entry) => entry.createdAt)).size).toBe(copied.length);
+            const leadTurns = (yield* harness.recorded("thread.turn.start")).filter(
+              (command) => command.threadId === LEAD,
+            );
+            expect(leadTurns).toEqual([]);
+
+            // pair_read_thread pages the Lead's thread back from the newest line.
+            const newest = yield* harness.coordinator.readThread(peerThreadId, { limit: 1 });
+            expect(newest).toMatchObject({
+              persona: "fable",
+              hasMore: true,
+              lines: [{ speaker: "agent", text: "Retries with full jitter are in." }],
+            });
+            const earlier = yield* harness.coordinator.readThread(peerThreadId, {
+              beforeMessageId: newest.lines[0]!.messageId,
+            });
+            expect(earlier).toMatchObject({
+              hasMore: false,
+              lines: [{ speaker: "user", messageId: first, text: "Let's add retries" }],
+            });
+          }),
+        ),
+    );
+
+    it.effect(
+      "copies a message typed in the Peer's thread, and the Peer's answer to it, to the Lead",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const harness = yield* makeHarness();
+            const roomId = yield* harness.createRoom();
+            yield* harness.coordinator.consult(LEAD, { question: "Thoughts?", waitSeconds: 0 });
+            const peerThreadId = yield* peerThreadOf(harness.store, roomId);
+            yield* harness.finishTurn({
+              threadId: peerThreadId,
+              state: "completed",
+              answer: "Fine.",
+            });
+            yield* harness.roomWhere((room) => room.consults[0]?.status === "answered");
+
+            yield* harness.sendUserMessage({
+              text: "Astra, what about timeouts?",
+              createdAt: "1970-01-01T00:00:02.000Z",
+              threadId: peerThreadId,
+            });
+            yield* harness.commandWhere(
+              (command) =>
+                command.type === "thread.message.user.append" && command.threadId === LEAD,
+            );
+            // The Peer's own turn for that message has no consult behind it, so its answer is copied too.
+            yield* harness.finishTurn({
+              threadId: peerThreadId,
+              state: "completed",
+              answer: "Cap them at 30s.",
+              turnId: TurnId.make("peer-own-turn"),
+            });
+            yield* harness.commandWhere(
+              (command) =>
+                command.type === "thread.message.user.append" &&
+                command.message.text.includes("Cap them"),
+            );
+            expect((yield* appendsTo(harness, LEAD)).map((entry) => entry.text)).toEqual([
+              "You → Astra: Astra, what about timeouts?",
+              "Astra (Peer) → you: Cap them at 30s.",
+            ]);
+            expect(yield* appendsTo(harness, peerThreadId)).toEqual([]);
+          }),
+        ),
+    );
+
+    it.effect(
+      "does not copy a relayed roundtable message, but does copy one the busy Peer missed",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const harness = yield* makeHarness();
+            const roomId = yield* harness.createRoom("roundtable");
+            yield* harness.sendUserMessage({
+              text: "Should retries use jitter?",
+              createdAt: "1970-01-01T00:00:01.000Z",
+            });
+            yield* harness.commandWhere(
+              turnStartWhere(
+                (command) => readPairRoomNote(command.message.context)?.purpose === "user-relay",
+              ),
+            );
+            const peerThreadId = yield* peerThreadOf(harness.store, roomId);
+            // Relayed as the Peer's prompt, so the catch-up on creation leaves it out.
+            expect(yield* appendsTo(harness, peerThreadId)).toEqual([]);
+
+            yield* harness.sendUserMessage({
+              text: "And the cap?",
+              createdAt: "1970-01-01T00:00:02.000Z",
+            });
+            const missed = yield* harness.commandWhere(
+              (command) => command.type === "thread.message.user.append",
+            );
+            expect(missed).toMatchObject({
+              threadId: peerThreadId,
+              message: { text: "You → Fable: And the cap?" },
+            });
+            expect((yield* harness.recorded("thread.turn.start")).length).toBe(1);
+          }),
+        ),
+    );
+
+    it.effect("tells the other side when a turn stopped without answering", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness();
+          const roomId = yield* harness.createRoom();
+          yield* harness.coordinator.consult(LEAD, { question: "Thoughts?", waitSeconds: 0 });
+          const peerThreadId = yield* peerThreadOf(harness.store, roomId);
+          yield* harness.finishTurn({ threadId: peerThreadId, state: "completed", answer: "Ok." });
+          yield* harness.roomWhere((room) => room.consults[0]?.status === "answered");
+
+          yield* harness.finishTurn({ threadId: LEAD, state: "interrupted", turnId: LEAD_TURN });
+          const stopped = yield* harness.commandWhere(
+            (command) => command.type === "thread.message.user.append",
+          );
+          expect(stopped).toMatchObject({
+            threadId: peerThreadId,
+            message: { text: "Fable's turn was stopped before it answered." },
+          });
+        }),
+      ),
+    );
+
+    it.effect("re-copies recent lines after a restart, which existing copies absorb", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const peerThreadId = ThreadId.make("peer-thread");
+          const harness = yield* makeHarness({
+            seed: (store) =>
+              Effect.gen(function* () {
+                const room = yield* store.dispatch({
+                  type: "room.create",
+                  roomId: "room-restart" as PairRoomId,
+                  projectId: PROJECT_ID,
+                  leadThreadId: LEAD,
+                  leadPersona: "fable",
+                  mode: "adaptive",
+                  at: MESSAGE_AT,
+                });
+                yield* store.dispatch({
+                  type: "peer.attach",
+                  roomId: room.roomId,
+                  threadId: peerThreadId,
+                  reviewWorktreePath: REVIEW_WORKTREE,
+                  at: MESSAGE_AT,
+                });
+              }),
+            messages: new Map([
+              [
+                LEAD,
+                [
+                  {
+                    id: MessageId.make("lead-user-1"),
+                    role: "user",
+                    text: "Add retries",
+                    turnId: null,
+                    streaming: false,
+                    createdAt: MESSAGE_AT,
+                    updatedAt: MESSAGE_AT,
+                  },
+                  {
+                    id: MessageId.make("lead-answer-1"),
+                    role: "assistant",
+                    text: "Added.",
+                    turnId: LEAD_TURN,
+                    streaming: false,
+                    createdAt: MESSAGE_AT,
+                    updatedAt: MESSAGE_AT,
+                  },
+                ] as unknown as OrchestrationThread["messages"],
+              ],
+            ]),
+          });
+          const copied = yield* appendsTo(harness, peerThreadId);
+          expect(copied.map((entry) => entry.text)).toEqual([
+            "You → Fable: Add retries",
+            "Fable (Lead) → you: Added.",
+          ]);
+          const ids = (yield* harness.recorded("thread.message.user.append")).map((command) => [
+            command.commandId,
+            command.message.messageId,
+          ]);
+          expect(ids).toEqual(
+            ["lead-user-1", "lead-answer-1"].map((source) => {
+              const key = pairTranscriptKey(peerThreadId, source);
+              return [`pair:transcript:${key}`, `pair-transcript-${key}`];
+            }),
+          );
+        }),
+      ),
+    );
+  });
 });

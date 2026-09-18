@@ -56,6 +56,7 @@ import { ProviderAuthService } from "../../provider/Services/ProviderAuthService
 import { makeProviderRegistryLayer } from "../../provider/testUtils/providerRegistryMock.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
+import { PairTranscriptPrelude } from "../../pair/PairTranscriptPrelude.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
@@ -187,6 +188,7 @@ describe("ProviderCommandReactor", () => {
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderServiceError>;
     readonly tryHandlePromptCommandEffect?: ProviderAuthService["Service"]["tryHandlePromptCommand"];
+    readonly pairTranscriptPrelude?: PairTranscriptPrelude["Service"]["forTurn"];
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -494,6 +496,11 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
+      Layer.provideMerge(
+        input?.pairTranscriptPrelude
+          ? Layer.succeed(PairTranscriptPrelude, { forTurn: input.pairTranscriptPrelude })
+          : Layer.empty,
+      ),
     );
     runtime = ManagedRuntime.make(layer);
 
@@ -930,6 +937,41 @@ describe("ProviderCommandReactor", () => {
       });
       expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
         input: expect.stringContaining('<context kind="terminal" id="terminal-1">'),
+      });
+    }),
+  );
+
+  effectIt.effect("opens the provider turn with the Pair Room catch-up when one is pending", () =>
+    Effect.gen(function* () {
+      const forTurn = vi.fn((_threadId: ThreadId, _messageId: MessageId) =>
+        Effect.succeed(Option.some("Catching up on the Pair Room.\n\n---\n\n")),
+      );
+      const harness = yield* Effect.promise(() =>
+        createHarness({ pairTranscriptPrelude: forTurn }),
+      );
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-with-prelude"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-with-prelude"),
+          role: "user",
+          text: "hello reactor",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+      expect(forTurn).toHaveBeenCalledWith(
+        ThreadId.make("thread-1"),
+        asMessageId("user-message-with-prelude"),
+      );
+      expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+        input: "Catching up on the Pair Room.\n\n---\n\nhello reactor",
       });
     }),
   );

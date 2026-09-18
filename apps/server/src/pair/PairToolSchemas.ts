@@ -253,6 +253,35 @@ export const PairRecordDecisionInput = Schema.Struct({
   waitSeconds: Schema.optional(WaitSeconds),
 });
 
+export const PAIR_READ_THREAD_DEFAULT_LIMIT = 20;
+
+export const PairReadThreadInput = Schema.Struct({
+  persona: Schema.optional(PairPersona).annotate({
+    description: "Whose thread to read. Defaults to the other participant.",
+  }),
+  beforeMessageId: Schema.optional(TrimmedNonEmptyString).annotate({
+    description: "Page back: return lines before this messageId from an earlier result.",
+  }),
+  limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 50 }))).annotate({
+    description: `Lines to return, newest last (1-50, default ${PAIR_READ_THREAD_DEFAULT_LIMIT}).`,
+  }),
+});
+
+export const PairReadThreadResult = Schema.Struct({
+  persona: PairPersona,
+  detail: Schema.String,
+  lines: Schema.Array(
+    Schema.Struct({
+      messageId: Schema.String,
+      at: Schema.String,
+      speaker: Schema.Literals(["user", "agent"]),
+      text: Schema.String,
+    }),
+  ),
+  hasMore: Schema.Boolean,
+});
+export type PairReadThreadResult = typeof PairReadThreadResult.Type;
+
 export const PairAckResult = Schema.Struct({
   /**
    * "settled" is a decision the user answered while you waited; "pending" is

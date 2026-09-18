@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 
 import {
   IsoDateTime,
+  MessageId,
   PositiveInt,
   ProjectId,
   ThreadId,
@@ -99,8 +100,17 @@ export const PairRoomNotePurpose = Schema.Literals([
   "peer-answer",
   /** A decision the user settled, brought to the Lead. */
   "decision",
+  /**
+   * A line of the other participant's conversation, appended without a turn
+   * so the next turn here can catch up on it. See `PairRoomNote.source`.
+   */
+  "transcript",
 ]);
 export type PairRoomNotePurpose = typeof PairRoomNotePurpose.Type;
+
+/** Who wrote a transcript line: the user, or the participant whose thread it came from. */
+export const PairTranscriptSpeaker = Schema.Literals(["user", "agent"]);
+export type PairTranscriptSpeaker = typeof PairTranscriptSpeaker.Type;
 
 export const PairRoomNote = Schema.Struct({
   purpose: PairRoomNotePurpose,
@@ -108,6 +118,15 @@ export const PairRoomNote = Schema.Struct({
   to: PairPersona,
   /** On a handoff, the previous Lead's thread, so the new thread can link back to it. */
   fromThreadId: Schema.optionalKey(ThreadId),
+  /** On a transcript line, where it was said; `from` is the participant whose thread that is. */
+  source: Schema.optionalKey(
+    Schema.Struct({
+      speaker: PairTranscriptSpeaker,
+      threadId: ThreadId,
+      messageId: MessageId,
+      createdAt: IsoDateTime,
+    }),
+  ),
 });
 export type PairRoomNote = typeof PairRoomNote.Type;
 

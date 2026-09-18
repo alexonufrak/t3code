@@ -61,5 +61,7 @@ export function pairRoomNoteTitle(note: PairRoomNote): string {
       return `${from}'s answer, brought back to ${to}`;
     case "decision":
       return `Your decision, sent to ${to}`;
+    case "transcript":
+      return note.source?.speaker === "user" ? `You, to ${from}` : `${from}, in its own thread`;
   }
 }
