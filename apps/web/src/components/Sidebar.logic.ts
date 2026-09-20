@@ -144,6 +144,21 @@ export type SidebarListItem =
     }
   | { readonly kind: "marker"; readonly marker: SidebarListMarker };
 
+/**
+ * Settled and snoozed are the only things that collapse a row into the slim
+ * form; every other thread is a full card, so density comes from users
+ * parking work. The one exception is a Pair Room Peer or assignment row
+ * listed under its Lead: slim, so the room reads as one card with a compact
+ * tail instead of a stack of equals.
+ */
+export function resolveSidebarRowVariant(
+  section: SidebarSection,
+  nested: boolean,
+): "card" | "slim" {
+  if (nested) return "slim";
+  return section === "active" || section === "pinned" ? "card" : "slim";
+}
+
 export function sidebarListItemId(item: SidebarListItem): string {
   return item.kind === "thread" ? item.key : sidebarMarkerId(item.marker);
 }

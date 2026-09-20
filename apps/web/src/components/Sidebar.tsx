@@ -167,6 +167,7 @@ import {
   resolveAdjacentThreadId,
   resolveSidebarDropTarget,
   resolveSidebarDropVerb,
+  resolveSidebarRowVariant,
   type SidebarDropVerb,
   resolveSidebarThreadStatus,
   searchSidebarThreads,
@@ -1028,7 +1029,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   onFileDropThreads?: ((threadRef: ScopedThreadRef, files: File[]) => void) | undefined;
   /** "Pair", "Peer" or "Assignment" for Pair Room threads. */
   pairRoleLabel: string | null;
-  /** Indents a Peer or assignment row listed under its Lead. */
+  /** A Peer or assignment row listed under its Lead; always the slim variant, drawn with a guide. */
   nested: boolean;
 }) {
   const {
@@ -1595,7 +1596,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         className={cn(
           // Matches the h-9 row so unrendered rows never shift the list when they paint.
           "list-none [content-visibility:auto] [contain-intrinsic-size:auto_36px]",
-          props.nested && "ps-3",
+          // A guide down the left edge groups Peer and assignment rows under their Lead's card.
+          props.nested && "ms-3 border-s-2 border-border/70 ps-1.5",
           sortable?.isDragging && "relative z-20",
         )}
       >
@@ -1750,7 +1752,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       className={cn(
         // Matches the h-[4.875rem] content box; the py-0.5 padding is added on top.
         "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_78px]",
-        props.nested && "ps-3",
         sortable?.isDragging && "relative z-20",
       )}
     >
@@ -4652,12 +4653,7 @@ export default function Sidebar() {
                         const threadKey = scopedThreadKey(
                           scopeThreadRef(thread.environmentId, thread.id),
                         );
-                        // Settled and snoozed are the ONLY things that collapse a
-                        // row: every other thread is a full card. Density comes
-                        // from users (or the auto rules) actually parking work,
-                        // not from the sidebar second-guessing what still matters.
-                        const isCard = section === "active" || section === "pinned";
-                        const rowVariant = isCard ? "card" : "slim";
+                        const rowVariant = resolveSidebarRowVariant(section, nested);
                         return (
                           <SidebarThreadRow
                             // Fade between card and compact rows while the outer

@@ -23,6 +23,7 @@ import {
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
   resolveProjectStatusIndicator,
+  resolveSidebarRowVariant,
   resolveThreadRowClassName,
   resolveSidebarThreadStatus,
   resolveThreadStatusPill,
@@ -2541,4 +2542,18 @@ describe("navigation after parking a thread", () => {
       ).toBe(expected);
     },
   );
+});
+
+describe("resolveSidebarRowVariant", () => {
+  it("keeps active and pinned threads as cards and parked ones slim", () => {
+    expect(resolveSidebarRowVariant("active", false)).toBe("card");
+    expect(resolveSidebarRowVariant("pinned", false)).toBe("card");
+    expect(resolveSidebarRowVariant("settled", false)).toBe("slim");
+    expect(resolveSidebarRowVariant("snoozed", false)).toBe("slim");
+  });
+
+  it("collapses a Peer or assignment row under its Lead whatever the section", () => {
+    expect(resolveSidebarRowVariant("active", true)).toBe("slim");
+    expect(resolveSidebarRowVariant("pinned", true)).toBe("slim");
+  });
 });
