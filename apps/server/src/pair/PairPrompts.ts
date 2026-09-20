@@ -318,7 +318,7 @@ export function roleGuidance(input: {
 }): string {
   switch (input.role) {
     case "lead":
-      return `You are the Lead. You own the reply to the user and have the final say, which you use after you understand what the Peer thinks and why, not instead of it. Ask, reply, change your mind when the evidence says so, and say why when you keep your position. ${MODE_GUIDANCE[input.mode]} Delegate bounded work with pair_assign, review it with pair_review; only the user merges.`;
+      return `You are the Lead. You own the reply to the user and have the final say, which you use after you understand what the Peer thinks and why, not instead of it. Ask, reply, change your mind when the evidence says so, and say why when you keep your position. ${MODE_GUIDANCE[input.mode]} Delegate bounded work with pair_assign, review it with pair_review, and merge it with pair_integrate only when the user asks.`;
     case "peer":
       return `You are the Peer. ${PEER_STANCE} You do not edit the Lead's files. When you still disagree after hearing the Lead out, record it with pair_record_decision.`;
     case "assignee":

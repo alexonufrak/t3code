@@ -12,6 +12,8 @@ import {
   PairAssignResult,
   PairCheckoutInput,
   PairCheckoutResult,
+  PairIntegrateInput,
+  PairIntegrateResult,
   PairConsultInput,
   PairHandleResult,
   PairReadThreadInput,
@@ -170,6 +172,20 @@ const PairReviewTool = Tool.make("pair_review", {
   .annotate(Tool.Idempotent, false)
   .annotate(Tool.OpenWorld, false);
 
+const PairIntegrateTool = Tool.make("pair_integrate", {
+  description:
+    "Pair Room, Lead only: merge an assignment you approved into its base branch because the user asked you to. Call it in the turn where they asked, quoting their words; the room refuses it in turns it started itself. Never merge an assignment branch with git yourself.",
+  parameters: PairIntegrateInput,
+  success: PairIntegrateResult,
+  failure: PairToolError,
+  dependencies,
+})
+  .annotate(Tool.Title, "Merge an assignment on the user's word")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, false)
+  .annotate(Tool.OpenWorld, false);
+
 const PairRecordDecisionTool = Tool.make("pair_record_decision", {
   description: `Pair Room, Lead or Peer: record a decision or a disagreement with your position and evidence, or add your position to an existing one by decisionId. The Lead may settle routine and architecture calls itself, and those return "recorded". Product, security, scope and destructive calls belong to the user: the tool waits up to waitSeconds (max ${PAIR_MAX_WAIT_SECONDS}) for their answer and returns "settled" with it, or "pending" with a handle for pair_wait. Tell the user what you recommend and why before you wait.`,
   parameters: PairRecordDecisionInput,
@@ -208,6 +224,7 @@ export const PairToolkit = Toolkit.make(
   PairReportProgressTool,
   PairSubmitTool,
   PairReviewTool,
+  PairIntegrateTool,
   PairRecordDecisionTool,
   PairReadThreadTool,
 );

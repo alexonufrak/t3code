@@ -485,6 +485,34 @@ const appendsTo = (harness: Effect.Success<ReturnType<typeof makeHarness>>, thre
     ),
   );
 
+/** Assigns, submits and approves one assignment; the Lead may be running or idle. */
+const approveAssignment = Effect.fn("approveAssignment")(function* (
+  harness: Effect.Success<ReturnType<typeof makeHarness>>,
+  input: { readonly baseRef?: string } = {},
+) {
+  const assigned = yield* harness.coordinator.assign(LEAD, {
+    title: "Retry tests",
+    brief: "Add tests for the retry policy.",
+    scopeGlobs: ["src/retry/**"],
+    acceptanceCriteria: [],
+    ...input,
+  });
+  expect(assigned.status).toBe("assigned");
+  yield* harness.coordinator.submit(ThreadId.make(assigned.threadId!), {
+    summary: "Done",
+    criteriaResults: [],
+    testsRun: [],
+    knownLimitations: [],
+  });
+  const approved = yield* harness.coordinator.review(LEAD, {
+    assignmentId: assigned.assignmentId!,
+    verdict: "approve",
+    notes: "ok",
+  });
+  expect(approved.assignment?.state).toBe("awaiting-user");
+  return assigned.assignmentId!;
+});
+
 describe("PairCoordinator", () => {
   it("recognizes an @-mention only as its own word", () => {
     expect(PairCoordinator.pairMessageMentions("@Astra, is this safe?", "astra")).toBe(true);
@@ -2055,34 +2083,6 @@ describe("PairCoordinator", () => {
   });
 
   describe("checkout", () => {
-    /** Assigns, submits and approves one assignment; the Lead may be running or idle. */
-    const approveAssignment = Effect.fn("approveAssignment")(function* (
-      harness: Effect.Success<ReturnType<typeof makeHarness>>,
-      input: { readonly baseRef?: string } = {},
-    ) {
-      const assigned = yield* harness.coordinator.assign(LEAD, {
-        title: "Retry tests",
-        brief: "Add tests for the retry policy.",
-        scopeGlobs: ["src/retry/**"],
-        acceptanceCriteria: [],
-        ...input,
-      });
-      expect(assigned.status).toBe("assigned");
-      yield* harness.coordinator.submit(ThreadId.make(assigned.threadId!), {
-        summary: "Done",
-        criteriaResults: [],
-        testsRun: [],
-        knownLimitations: [],
-      });
-      const approved = yield* harness.coordinator.review(LEAD, {
-        assignmentId: assigned.assignmentId!,
-        verdict: "approve",
-        notes: "ok",
-      });
-      expect(approved.assignment?.state).toBe("awaiting-user");
-      return assigned.assignmentId!;
-    });
-
     it.effect("follows the checkout the Lead points it at: snapshots, assignments, status", () =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -2349,6 +2349,157 @@ describe("PairCoordinator", () => {
             state: "integrated",
             integrationCommit: "head1234567890",
           });
+        }),
+      ),
+    );
+  });
+
+  describe("integrate on the user's word", () => {
+    /** The user message that opened the Lead's current turn, written by the user or sent by the room. */
+    const leadOpener = (text: string, context?: unknown) =>
+      new Map([
+        [
+          LEAD,
+          [
+            {
+              id: MessageId.make("lead-opener"),
+              role: "user",
+              text,
+              turnId: LEAD_TURN,
+              streaming: false,
+              createdAt: MESSAGE_AT,
+              updatedAt: MESSAGE_AT,
+              ...(context ? { context } : {}),
+            },
+          ] as unknown as OrchestrationThread["messages"],
+        ],
+      ]);
+
+    it.effect(
+      "merges an approved assignment when the Lead calls pair_integrate in the user's turn",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const harness = yield* makeHarness({ messages: leadOpener("merge astra's tests") });
+            const roomId = yield* harness.createRoom();
+            const assignmentId = yield* approveAssignment(harness);
+            const result = yield* harness.coordinator.integrate(LEAD, {
+              assignmentId,
+              userWords: "merge astra's tests",
+            });
+            expect(result).toMatchObject({
+              status: "merged",
+              assignmentId,
+              commit: "merge1234567890",
+              target: "main",
+            });
+            expect(result.detail).toContain("Tell the user");
+            expect(yield* Ref.get(harness.integratedInto)).toBe("/repo");
+            expect(
+              Option.getOrThrow(yield* harness.store.get(roomId)).assignments[0],
+            ).toMatchObject({
+              state: "integrated",
+              integrationCommit: "merge1234567890",
+              note: `Merged into main by Fable on the user's word ("merge astra's tests") as merge1234567.`,
+            });
+            const card = (yield* harness.recorded("thread.activity.append")).findLast(
+              (command) =>
+                command.threadId === LEAD && command.activity.summary === "Assignment merged",
+            );
+            expect(card).toBeDefined();
+          }),
+        ),
+    );
+
+    it.effect(
+      "refuses pair_integrate in a turn the room started, since the user did not ask there",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const harness = yield* makeHarness({
+              messages: leadOpener(
+                "Astra (Peer) → you: Looks good.",
+                pairRoomNoteContext("note-1", {
+                  purpose: "peer-answer",
+                  from: "astra",
+                  to: "fable",
+                }),
+              ),
+            });
+            const roomId = yield* harness.createRoom();
+            const assignmentId = yield* approveAssignment(harness);
+            const result = yield* harness.coordinator.integrate(LEAD, {
+              assignmentId,
+              userWords: "merge it",
+            });
+            expect(result).toMatchObject({ status: "rejected", reason: "not-asked", commit: null });
+            expect(result.detail).toContain("Say the assignment is ready and stop");
+            expect(yield* Ref.get(harness.integratedInto)).toBeNull();
+            expect(Option.getOrThrow(yield* harness.store.get(roomId)).assignments[0]?.state).toBe(
+              "awaiting-user",
+            );
+          }),
+        ),
+    );
+
+    it.effect("refuses pair_integrate from the Peer and for an assignment not yet approved", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness({ messages: leadOpener("merge it") });
+          const roomId = yield* harness.createRoom();
+          const assigned = yield* harness.coordinator.assign(LEAD, {
+            title: "Retry tests",
+            brief: "Add tests for the retry policy.",
+            scopeGlobs: ["src/retry/**"],
+            acceptanceCriteria: [],
+          });
+          const assignmentId = assigned.assignmentId!;
+          yield* harness.coordinator.submit(ThreadId.make(assigned.threadId!), {
+            summary: "Done",
+            criteriaResults: [],
+            testsRun: [],
+            knownLimitations: [],
+          });
+          const unreviewed = yield* harness.coordinator.integrate(LEAD, {
+            assignmentId,
+            userWords: "merge it",
+          });
+          expect(unreviewed).toMatchObject({ status: "rejected", reason: "invalid" });
+          expect(unreviewed.detail).toContain("Only an approved assignment can be merged");
+
+          yield* harness.coordinator.consult(LEAD, { question: "Look?", waitSeconds: 0 });
+          const peerThreadId = yield* peerThreadOf(harness.store, roomId);
+          const notLead = yield* harness.coordinator.integrate(peerThreadId, {
+            assignmentId,
+            userWords: "merge it",
+          });
+          expect(notLead).toMatchObject({ status: "rejected", reason: "not-allowed" });
+          expect(yield* Ref.get(harness.integratedInto)).toBeNull();
+        }),
+      ),
+    );
+
+    it.effect("returns the merge's refusal to the Lead and leaves the card waiting", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness({ messages: leadOpener("merge it") });
+          const roomId = yield* harness.createRoom();
+          const assignmentId = yield* approveAssignment(harness);
+          yield* Ref.set(harness.integration, {
+            status: "conflict",
+            detail: "Conflicts in src/retry.ts.",
+          });
+          const result = yield* harness.coordinator.integrate(LEAD, {
+            assignmentId,
+            userWords: "merge it",
+          });
+          expect(result).toMatchObject({ status: "rejected", reason: "conflict" });
+          expect(result.detail).toContain(
+            "hit conflicts, so nothing was merged. Conflicts in src/retry.ts.",
+          );
+          const assignment = Option.getOrThrow(yield* harness.store.get(roomId)).assignments[0];
+          expect(assignment?.state).toBe("awaiting-user");
+          expect(assignment?.note).toBe("Nothing was merged. Conflicts in src/retry.ts.");
         }),
       ),
     );

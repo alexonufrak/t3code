@@ -294,6 +294,24 @@ export const PairReviewInput = Schema.Struct({
   notes: Text,
 });
 
+export const PairIntegrateInput = Schema.Struct({
+  assignmentId: TrimmedNonEmptyString,
+  userWords: Text.annotate({
+    description:
+      "What the user said in this turn asking for the merge, quoted. It is recorded on the assignment card.",
+  }),
+});
+
+export const PairIntegrateResult = Schema.Struct({
+  status: Schema.Literals(["merged", "rejected"]),
+  assignmentId: Schema.String,
+  commit: Schema.NullOr(Schema.String),
+  target: Schema.NullOr(Schema.String),
+  reason: Schema.NullOr(Schema.String),
+  detail: Schema.String,
+});
+export type PairIntegrateResult = typeof PairIntegrateResult.Type;
+
 export const PairRecordDecisionInput = Schema.Struct({
   decisionId: Schema.optional(TrimmedNonEmptyString).annotate({
     description: "Add your position to an existing decision instead of recording a new one.",

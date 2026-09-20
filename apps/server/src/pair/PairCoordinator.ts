@@ -75,6 +75,7 @@ import {
   type PairAckResult,
   type PairAssignResult,
   type PairCheckoutResult,
+  type PairIntegrateResult,
   type PairAssignmentView,
   type PairCallerRole,
   type PairDecisionView,
@@ -207,6 +208,10 @@ export class PairCoordinator extends Context.Service<
         readonly notes: string;
       },
     ) => ToolEffect<PairAckResult>;
+    readonly integrate: (
+      threadId: ThreadId,
+      input: { readonly assignmentId: string; readonly userWords: string },
+    ) => ToolEffect<PairIntegrateResult>;
     readonly recordDecision: (
       threadId: ThreadId,
       input: {
@@ -1775,6 +1780,41 @@ export const make = Effect.gen(function* () {
       }),
     );
 
+  const integrate: PairCoordinator["Service"]["integrate"] = (threadId, input) =>
+    toolEdge<PairIntegrateResult>(
+      Effect.gen(function* () {
+        const caller = yield* requireRole(yield* resolveCaller(threadId), ["lead"]);
+        const assignment = yield* requireApproved(caller.room, input.assignmentId);
+        const lead = yield* leadContext(caller.room);
+        if (lead.activeTurnId && (yield* turnStartedByRoom(lead.threadId, lead.activeTurnId))) {
+          return yield* rejected(
+            "not-asked",
+            "The room started this turn, so the user has not asked for a merge in it. Say the assignment is ready and stop; merge only in the turn where they ask.",
+          );
+        }
+        const merged = yield* integrateAssignment(caller.room, assignment, lead, {
+          by: "lead",
+          userWords: input.userWords,
+        });
+        return {
+          status: "merged",
+          assignmentId: assignment.assignmentId,
+          commit: merged.commit,
+          target: merged.target,
+          reason: null,
+          detail: `Merged "${assignment.title}" into ${merged.target} as ${merged.commit.slice(0, 12)}. Tell the user.`,
+        } satisfies PairIntegrateResult;
+      }),
+      (error) => ({
+        status: "rejected",
+        assignmentId: input.assignmentId,
+        commit: null,
+        target: null,
+        reason: error.reason,
+        detail: error.detail,
+      }),
+    );
+
   const reportProgress: PairCoordinator["Service"]["reportProgress"] = (threadId, input) =>
     toolEdge<PairAckResult>(
       Effect.gen(function* () {
@@ -1945,7 +1985,7 @@ export const make = Effect.gen(function* () {
               reason: null,
               detail:
                 approved.assignment.state === "awaiting-user"
-                  ? `Approved. It merges into ${assignment.targetBranch ?? "the room's checkout"} when the user says so, from the room controls or by telling you; say it is ready.`
+                  ? `Approved. It merges into ${assignment.targetBranch ?? "the room's checkout"} when the user says so: from the room controls, or by telling you, in which case you call pair_integrate. Say it is ready.`
                   : "Approved and completed.",
               assignment: pairAssignmentView(approved.assignment),
               decision: null,
@@ -2165,6 +2205,142 @@ export const make = Effect.gen(function* () {
       : rejected("not-found", `Assignment ${assignmentId} was not found.`);
   };
 
+  const requireApproved = (room: PairRoom, assignmentId: string) =>
+    Effect.gen(function* () {
+      const assignment = yield* requireAssignment(room, assignmentId);
+      if (assignment.state !== "awaiting-user") {
+        return yield* rejected(
+          "invalid",
+          `Only an approved assignment can be merged; this one is ${assignment.state}.`,
+        );
+      }
+      return assignment;
+    });
+
+  /** Whether a turn opened with a message the room sent, rather than one the user wrote. */
+  const turnStartedByRoom = (threadId: ThreadId, turnId: TurnId) =>
+    readMessages(threadId).pipe(
+      Effect.map((messages) => {
+        const opener = messages.find(
+          (message) => message.role === "user" && message.turnId === turnId,
+        );
+        return opener !== undefined && readPairRoomNote(opener.context) !== null;
+      }),
+    );
+
+  /**
+   * Merges an approved assignment into the worktree that has its base branch
+   * checked out, or records a merge that already happened there. Shared by
+   * the user's Merge control and the Lead's pair_integrate on the user's
+   * word; each caller settles first whether the Lead may be mid-turn.
+   */
+  const integrateAssignment = (
+    room: PairRoom,
+    assignment: PairAssignment,
+    lead: LeadContext,
+    actor: { readonly by: "user" } | { readonly by: "lead"; readonly userWords: string },
+  ) =>
+    Effect.gen(function* () {
+      const assignmentShell = yield* threadShell(assignment.threadId);
+      if (Option.isSome(assignmentShell) && isRunningTurn(assignmentShell.value)) {
+        return yield* rejected("conflict", "The assignment thread is still running.");
+      }
+      // Both paths act on the user's word, so the room records them as the user's.
+      const sendBackForReview = (detail: string) =>
+        Effect.gen(function* () {
+          yield* updateAssignment(room, assignment, {
+            by: "user",
+            state: "submitted",
+            note: `${detail} Nothing was merged; the Lead needs to review it again.`,
+          });
+          return yield* rejected(
+            "conflict",
+            `${detail} Nothing was merged. ${
+              actor.by === "user"
+                ? `Ask ${personaName(lead.persona)} to review it again.`
+                : "Review it again with pair_review."
+            }`,
+          );
+        });
+      if (assignment.approvedCommit === null) {
+        return yield* sendBackForReview("This assignment was approved without a pinned commit.");
+      }
+      const approvedCommit = assignment.approvedCommit;
+      // Older assignments carry no target; they merge into the room's checkout.
+      const target = assignment.targetBranch ?? lead.branch;
+      const targetName = target ?? "the checkout";
+      const card = assignmentCard(assignment);
+      const settleMerged = (commit: string, how: string) =>
+        Effect.gen(function* () {
+          const merged = yield* updateAssignment(room, assignment, {
+            by: "user",
+            state: "integrated",
+            integrationCommit: commit,
+            note: `${how} as ${commit.slice(0, 12)}.`,
+          });
+          yield* mirror(merged.room, {
+            kind: "task.progress",
+            summary: "Assignment merged",
+            payload: pairMirrorProgressPayload(card, {
+              status: "waiting",
+              summary: `${how} as ${commit.slice(0, 12)}.`,
+            }),
+            turnId: null,
+          });
+          return { commit, target: targetName };
+        });
+      // Merged by hand, or by the Lead on the user's word: record it rather than merge twice.
+      const already = yield* fromWorkspace(
+        workspace.containsCommit({
+          cwd: lead.cwd,
+          ref: target ? `refs/heads/${target}` : "HEAD",
+          commit: approvedCommit,
+        }),
+      );
+      if (already) {
+        return yield* settleMerged(already, `Already merged into ${targetName} outside the room`);
+      }
+      const targetCwd =
+        target === null || target === lead.branch
+          ? lead.cwd
+          : yield* fromWorkspace(workspace.findBranchWorktree({ cwd: lead.cwd, branch: target }));
+      if (targetCwd === null) {
+        return yield* rejected(
+          "conflict",
+          `${target} is not checked out in any worktree, so there is nowhere to merge into. Check it out, or point the room at it with pair_checkout, then merge again.`,
+        );
+      }
+      const result = yield* fromWorkspace(
+        workspace.integrate({
+          targetCwd,
+          worktreePath: assignment.worktreePath,
+          branch: assignment.branch,
+          commit: approvedCommit,
+          message: `Pair assignment: ${assignment.title}`,
+        }),
+      );
+      if (result.status === "changed") {
+        return yield* sendBackForReview(result.detail);
+      }
+      if (result.status === "dirty" || result.status === "conflict") {
+        yield* updateAssignment(room, assignment, {
+          by: "user",
+          note: `Nothing was merged. ${result.detail}`,
+        });
+        return yield* rejected(
+          "conflict",
+          result.status === "dirty"
+            ? result.detail
+            : `Merging ${assignment.branch} into ${targetName} hit conflicts, so nothing was merged. ${result.detail}`,
+        );
+      }
+      const how =
+        actor.by === "lead"
+          ? `Merged into ${targetName} by ${personaName(lead.persona)} on the user's word ("${actor.userWords}")`
+          : `Merged into ${targetName}`;
+      return yield* settleMerged(result.commit, how);
+    });
+
   const runUserCommand = (command: PairRoomUserCommand) =>
     Effect.gen(function* () {
       const at = yield* nowIso;
@@ -2275,13 +2451,7 @@ export const make = Effect.gen(function* () {
         }
         case "assignment.integrate": {
           const room = yield* requireRoom(command.roomId);
-          const assignment = yield* requireAssignment(room, command.assignmentId);
-          if (assignment.state !== "awaiting-user") {
-            return yield* rejected(
-              "invalid",
-              `Only an approved assignment can be merged; this one is ${assignment.state}.`,
-            );
-          }
+          const assignment = yield* requireApproved(room, command.assignmentId);
           const lead = yield* leadContext(room);
           if (lead.activeTurnId || isRunningTurn(lead.shell)) {
             return yield* rejected(
@@ -2289,102 +2459,8 @@ export const make = Effect.gen(function* () {
               `Wait for ${personaName(lead.persona)} to finish its turn before merging.`,
             );
           }
-          const assignmentShell = yield* threadShell(assignment.threadId);
-          if (Option.isSome(assignmentShell) && isRunningTurn(assignmentShell.value)) {
-            return yield* rejected("conflict", "The assignment thread is still running.");
-          }
-          const sendBackForReview = (detail: string) =>
-            Effect.gen(function* () {
-              yield* updateAssignment(room, assignment, {
-                by: "user",
-                state: "submitted",
-                note: `${detail} Nothing was merged; the Lead needs to review it again.`,
-              });
-              return yield* rejected(
-                "conflict",
-                `${detail} Nothing was merged. Ask ${personaName(lead.persona)} to review it again.`,
-              );
-            });
-          if (assignment.approvedCommit === null) {
-            return yield* sendBackForReview(
-              "This assignment was approved without a pinned commit.",
-            );
-          }
-          const approvedCommit = assignment.approvedCommit;
-          // Older assignments carry no target; they merge into the room's checkout.
-          const target = assignment.targetBranch ?? lead.branch;
-          const targetName = target ?? "the checkout";
-          const card = assignmentCard(assignment);
-          const settleMerged = (commit: string, how: string) =>
-            Effect.gen(function* () {
-              const merged = yield* updateAssignment(room, assignment, {
-                by: "user",
-                state: "integrated",
-                integrationCommit: commit,
-                note: `${how} as ${commit.slice(0, 12)}.`,
-              });
-              yield* mirror(merged.room, {
-                kind: "task.progress",
-                summary: "Assignment merged",
-                payload: pairMirrorProgressPayload(card, {
-                  status: "waiting",
-                  summary: `${how} as ${commit.slice(0, 12)}.`,
-                }),
-                turnId: null,
-              });
-              return room.roomId;
-            });
-          // Merged by hand, or by the Lead on the user's word: record it rather than merge twice.
-          const already = yield* fromWorkspace(
-            workspace.containsCommit({
-              cwd: lead.cwd,
-              ref: target ? `refs/heads/${target}` : "HEAD",
-              commit: approvedCommit,
-            }),
-          );
-          if (already) {
-            return yield* settleMerged(
-              already,
-              `Already merged into ${targetName} outside the room`,
-            );
-          }
-          const targetCwd =
-            target === null || target === lead.branch
-              ? lead.cwd
-              : yield* fromWorkspace(
-                  workspace.findBranchWorktree({ cwd: lead.cwd, branch: target }),
-                );
-          if (targetCwd === null) {
-            return yield* rejected(
-              "conflict",
-              `${target} is not checked out in any worktree, so there is nowhere to merge into. Check it out, or point the room at it with pair_checkout, then merge again.`,
-            );
-          }
-          const result = yield* fromWorkspace(
-            workspace.integrate({
-              targetCwd,
-              worktreePath: assignment.worktreePath,
-              branch: assignment.branch,
-              commit: approvedCommit,
-              message: `Pair assignment: ${assignment.title}`,
-            }),
-          );
-          if (result.status === "changed") {
-            return yield* sendBackForReview(result.detail);
-          }
-          if (result.status === "dirty" || result.status === "conflict") {
-            yield* updateAssignment(room, assignment, {
-              by: "user",
-              note: `Nothing was merged. ${result.detail}`,
-            });
-            return yield* rejected(
-              "conflict",
-              result.status === "dirty"
-                ? result.detail
-                : `Merging ${assignment.branch} into ${targetName} hit conflicts, so nothing was merged. ${result.detail}`,
-            );
-          }
-          return yield* settleMerged(result.commit, `Merged into ${targetName}`);
+          yield* integrateAssignment(room, assignment, lead, { by: "user" });
+          return room.roomId;
         }
         case "assignment.cancel": {
           const room = yield* requireRoom(command.roomId);
@@ -3330,6 +3406,7 @@ export const make = Effect.gen(function* () {
     reportProgress,
     submit,
     review,
+    integrate,
     recordDecision,
     readThread,
   });
