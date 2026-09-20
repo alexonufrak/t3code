@@ -28,8 +28,23 @@ export interface PairAssignmentWorktreePlan {
 export type PairIntegrationResult =
   | { readonly status: "merged"; readonly commit: string }
   | { readonly status: "conflict"; readonly detail: string }
+  /** Uncommitted changes in the target sit on files the merge would write; nothing was merged. */
+  | { readonly status: "dirty"; readonly detail: string; readonly files: ReadonlyArray<string> }
   /** The branch or worktree moved after approval; nothing was merged. */
   | { readonly status: "changed"; readonly detail: string };
+
+export interface PairCheckoutInfo {
+  /** The worktree root, resolved. */
+  readonly path: string;
+  /** The branch checked out there, or null when detached. */
+  readonly branch: string | null;
+}
+
+export interface PairAssignmentBase {
+  readonly commit: string;
+  /** The local branch the assignment merges back into, or null for a detached checkout. */
+  readonly branch: string | null;
+}
 
 /**
  * Git work for a pair room. The Peer never runs in the Lead's checkout: it
@@ -87,13 +102,46 @@ export class PairWorkspace extends Context.Service<
       readonly branch: string;
       readonly message: string;
     }) => Effect.Effect<string, PairWorkspaceError>;
+    /** The branch checked out at `cwd`, or null when detached. */
+    readonly currentBranch: (input: {
+      readonly cwd: string;
+    }) => Effect.Effect<string | null, PairWorkspaceError>;
     /**
-     * Merges exactly the approved commit into the Lead's checkout with `--no-ff`,
-     * after checking the branch still points at it and the worktree is clean.
-     * A conflict aborts the merge and leaves both sides as they were.
+     * A checkout the room can follow: a worktree of the same repository as
+     * `projectCwd`, normalized to its root, with the branch checked out there.
+     */
+    readonly describeCheckout: (input: {
+      readonly cwd: string;
+      readonly projectCwd: string;
+    }) => Effect.Effect<PairCheckoutInfo, PairWorkspaceError>;
+    /**
+     * An assignment's base: the commit to branch from and the local branch it
+     * merges back into. `ref` must name a local branch; omitted, the base is
+     * the checkout's HEAD and its branch.
+     */
+    readonly resolveBase: (input: {
+      readonly cwd: string;
+      readonly ref?: string | undefined;
+    }) => Effect.Effect<PairAssignmentBase, PairWorkspaceError>;
+    /** The worktree that has `branch` checked out, or null when none does. */
+    readonly findBranchWorktree: (input: {
+      readonly cwd: string;
+      readonly branch: string;
+    }) => Effect.Effect<string | null, PairWorkspaceError>;
+    /** The head of `ref` when it already contains `commit`, else null (also when `ref` is missing). */
+    readonly containsCommit: (input: {
+      readonly cwd: string;
+      readonly ref: string;
+      readonly commit: string;
+    }) => Effect.Effect<string | null, PairWorkspaceError>;
+    /**
+     * Merges exactly the approved commit into `targetCwd` with `--no-ff`, after
+     * checking the branch still points at it, the assignment worktree is
+     * clean, and no uncommitted change in the target sits on a file the merge
+     * writes. A conflict aborts the merge and leaves both sides as they were.
      */
     readonly integrate: (input: {
-      readonly leadCwd: string;
+      readonly targetCwd: string;
       readonly worktreePath: string;
       readonly branch: string;
       readonly commit: string;
@@ -166,6 +214,9 @@ export const make = Effect.gen(function* () {
 
   const worktreesRoot = path.resolve(config.worktreesDir);
 
+  const realPath = (value: string) =>
+    fileSystem.realPath(value).pipe(Effect.orElseSucceed(() => path.resolve(value)));
+
   /** Refuses any destructive command on a path this module did not create. */
   const assertRoomOwned = (operation: string, target: string) => {
     const resolved = path.resolve(target);
@@ -190,8 +241,6 @@ export const make = Effect.gen(function* () {
       const output = yield* git(operation, worktreePath, ["rev-parse", "--show-toplevel"], {
         allowNonZeroExit: true,
       });
-      const realPath = (value: string) =>
-        fileSystem.realPath(value).pipe(Effect.orElseSucceed(() => path.resolve(value)));
       if (
         output.exitCode !== 0 ||
         (yield* realPath(output.stdout.trim())) !== (yield* realPath(worktreePath))
@@ -224,6 +273,110 @@ export const make = Effect.gen(function* () {
         `${input.ref ?? "HEAD"}^{commit}`,
       ]);
       return output.stdout.trim();
+    });
+
+  const currentBranch = (input: { readonly cwd: string }) =>
+    git("currentBranch", input.cwd, ["symbolic-ref", "-q", "--short", "HEAD"], {
+      allowNonZeroExit: true,
+    }).pipe(Effect.map((output) => (output.exitCode === 0 ? output.stdout.trim() || null : null)));
+
+  const describeCheckout = (input: { readonly cwd: string; readonly projectCwd: string }) =>
+    Effect.gen(function* () {
+      const operation = "describeCheckout";
+      const root = yield* repoRoot(operation, input.cwd).pipe(
+        Effect.mapError(
+          () =>
+            new PairWorkspaceError({
+              operation,
+              detail: `${input.cwd} is not inside a git worktree.`,
+            }),
+        ),
+      );
+      const projectRoot = yield* repoRoot(operation, input.projectCwd);
+      const commonDir = (cwd: string) =>
+        git(operation, cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).pipe(
+          Effect.flatMap((output) => realPath(output.stdout.trim())),
+        );
+      if ((yield* commonDir(root)) !== (yield* commonDir(projectRoot))) {
+        return yield* new PairWorkspaceError({
+          operation,
+          detail: `${root} is not a worktree of this project's repository (${projectRoot}), so the room cannot follow it.`,
+        });
+      }
+      return {
+        path: yield* realPath(root),
+        branch: yield* currentBranch({ cwd: root }),
+      } satisfies PairCheckoutInfo;
+    });
+
+  const resolveBase = (input: { readonly cwd: string; readonly ref?: string | undefined }) =>
+    Effect.gen(function* () {
+      const operation = "resolveBase";
+      if (input.ref === undefined) {
+        return {
+          commit: yield* resolveCommit({ cwd: input.cwd }),
+          branch: yield* currentBranch({ cwd: input.cwd }),
+        } satisfies PairAssignmentBase;
+      }
+      const notBranch = new PairWorkspaceError({
+        operation,
+        detail: `"${input.ref}" is not a local branch. An assignment starts from a branch and merges back into it: pass a branch name, or omit baseRef to use the checkout's branch.`,
+      });
+      yield* repoRoot(operation, input.cwd);
+      // Prints the full ref name only for a single ref; a commit id, a missing name or an option prints nothing.
+      const named = yield* git(
+        operation,
+        input.cwd,
+        ["rev-parse", "-q", "--verify", "--symbolic-full-name", input.ref],
+        { allowNonZeroExit: true },
+      );
+      const fullName = named.exitCode === 0 ? named.stdout.trim() : "";
+      if (!fullName.startsWith("refs/heads/")) return yield* notBranch;
+      return {
+        commit: yield* resolveCommit({ cwd: input.cwd, ref: fullName }),
+        branch: fullName.slice("refs/heads/".length),
+      } satisfies PairAssignmentBase;
+    });
+
+  const findBranchWorktree = (input: { readonly cwd: string; readonly branch: string }) =>
+    Effect.gen(function* () {
+      const operation = "findBranchWorktree";
+      const root = yield* repoRoot(operation, input.cwd);
+      const list = yield* git(operation, root, ["worktree", "list", "--porcelain"]);
+      let current: string | null = null;
+      for (const line of list.stdout.split("\n")) {
+        if (line.startsWith("worktree ")) current = line.slice("worktree ".length);
+        else if (line === `branch refs/heads/${input.branch}` && current) return current;
+      }
+      return null;
+    });
+
+  const containsCommit = (input: {
+    readonly cwd: string;
+    readonly ref: string;
+    readonly commit: string;
+  }) =>
+    Effect.gen(function* () {
+      const operation = "containsCommit";
+      const head = yield* git(
+        operation,
+        input.cwd,
+        ["rev-parse", "-q", "--verify", `${input.ref}^{commit}`],
+        { allowNonZeroExit: true },
+      );
+      if (head.exitCode !== 0) return null;
+      const ancestor = yield* git(
+        operation,
+        input.cwd,
+        ["merge-base", "--is-ancestor", input.commit, head.stdout.trim()],
+        { allowNonZeroExit: true },
+      );
+      if (ancestor.exitCode === 0) return head.stdout.trim();
+      if (ancestor.exitCode === 1) return null;
+      return yield* new PairWorkspaceError({
+        operation,
+        detail: ancestor.stderr.trim() || "git merge-base failed.",
+      });
     });
 
   const syncReviewWorktree = (input: { readonly roomId: PairRoomId; readonly leadCwd: string }) =>
@@ -348,7 +501,7 @@ export const make = Effect.gen(function* () {
     });
 
   const integrate = (input: {
-    readonly leadCwd: string;
+    readonly targetCwd: string;
     readonly worktreePath: string;
     readonly branch: string;
     readonly commit: string;
@@ -371,36 +524,94 @@ export const make = Effect.gen(function* () {
           detail: `${input.branch} changed after it was approved.`,
         } satisfies PairIntegrationResult;
       }
+      // A dry run first: it names conflicts without touching the tree, and shows
+      // which files the merge writes, so uncommitted work in the target is
+      // reported by name instead of as git's refusal.
+      const dryRun = yield* git(
+        operation,
+        input.targetCwd,
+        ["merge-tree", "--write-tree", "--no-messages", "--name-only", "HEAD", input.commit],
+        { allowNonZeroExit: true, timeoutMs: 120_000 },
+      );
+      const dryRunLines = dryRun.stdout.trim().split("\n");
+      if (dryRun.exitCode === 1) {
+        const files = dryRunLines.slice(1).filter((line) => line.length > 0);
+        return {
+          status: "conflict",
+          detail: `Conflicts in ${files.join(", ") || "the merge"}.`,
+        } satisfies PairIntegrationResult;
+      }
+      if (dryRun.exitCode === 0 && dryRunLines[0]) {
+        const dirty = yield* git(operation, input.targetCwd, [
+          "status",
+          "--porcelain",
+          "--no-renames",
+          "--untracked-files=all",
+        ]);
+        const dirtyFiles = new Set(
+          dirty.stdout
+            .split("\n")
+            .filter((line) => line.length > 3)
+            .map((line) => line.slice(3)),
+        );
+        if (dirtyFiles.size > 0) {
+          const written = yield* git(operation, input.targetCwd, [
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "HEAD",
+            dryRunLines[0],
+          ]);
+          const files = written.stdout
+            .split("\n")
+            .filter((file) => file.length > 0 && dirtyFiles.has(file));
+          if (files.length > 0) {
+            return {
+              status: "dirty",
+              files,
+              detail: `${files.length} uncommitted ${files.length === 1 ? "file" : "files"} in ${input.targetCwd} would be overwritten by the merge: ${files.slice(0, 8).join(", ")}${files.length > 8 ? ` and ${files.length - 8} more` : ""}. Commit or stash them, then merge again.`,
+            } satisfies PairIntegrationResult;
+          }
+        }
+      }
       // Merge the approved commit by id: a branch name can be shadowed by a tag.
       const merge = yield* git(
         operation,
-        input.leadCwd,
+        input.targetCwd,
         ["merge", "--no-ff", "--no-edit", "--no-verify", "-m", input.message, input.commit],
         { allowNonZeroExit: true, timeoutMs: 120_000 },
       );
       if (merge.exitCode === 0) {
-        const head = yield* git(operation, input.leadCwd, ["rev-parse", "HEAD"]);
+        const head = yield* git(operation, input.targetCwd, ["rev-parse", "HEAD"]);
         return { status: "merged", commit: head.stdout.trim() } satisfies PairIntegrationResult;
       }
       const mergeHead = yield* git(
         operation,
-        input.leadCwd,
+        input.targetCwd,
         ["rev-parse", "-q", "--verify", "MERGE_HEAD"],
         { allowNonZeroExit: true },
       );
       if (mergeHead.exitCode === 0) {
-        yield* git(operation, input.leadCwd, ["merge", "--abort"]);
+        yield* git(operation, input.targetCwd, ["merge", "--abort"]);
       }
-      const detail = `${merge.stdout}\n${merge.stderr}`.trim().split("\n").slice(-12).join("\n");
+      // Git's reason is the first line; the file list after it can be long.
+      const lines = `${merge.stdout}\n${merge.stderr}`.trim().split("\n");
+      const detail =
+        lines.length > 12 ? [lines[0], ...lines.slice(1, 9), "...", ...lines.slice(-2)] : lines;
       return {
         status: "conflict",
-        detail: detail || "git merge failed.",
+        detail: detail.join("\n").trim() || "git merge failed.",
       } satisfies PairIntegrationResult;
     });
 
   return PairWorkspace.of({
     assertRepository,
     resolveCommit,
+    currentBranch,
+    describeCheckout,
+    resolveBase,
+    findBranchWorktree,
+    containsCommit,
     syncReviewWorktree,
     planAssignmentWorktree,
     createAssignmentWorktree,

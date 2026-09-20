@@ -111,6 +111,7 @@ const assign = (assignmentId: string, scopeGlobs: ReadonlyArray<string>): PairRo
   worktreePath: `/worktrees/${assignmentId}`,
   branch: `pair/${assignmentId}`,
   baseCommit: "abc123",
+  targetBranch: "main",
   scopeGlobs,
   acceptanceCriteria: ["Tests pass"],
   expectedArtifact: "patch",
@@ -720,5 +721,55 @@ describe("lead switch", () => {
     expect(
       apply(rooms, { type: "lead.switch-cancel", roomId: ROOM_ID, at: AT }).leadSwitch,
     ).toBeNull();
+  });
+});
+
+describe("checkout", () => {
+  it("records where the Lead works and the branch it is on, until the room closes", () => {
+    const rooms = createRoom();
+    expect(rooms.get(ROOM_ID)?.checkout).toBeNull();
+    const moved = apply(rooms, {
+      type: "room.checkout",
+      roomId: ROOM_ID,
+      path: "/repo-ux",
+      branch: "dev/ux",
+      by: "lead",
+      at: AT,
+    });
+    expect(moved.checkout).toEqual({ path: "/repo-ux", branch: "dev/ux", by: "lead", at: AT });
+    // The server re-reads the branch; who moved it stays.
+    const detached = apply(rooms, {
+      type: "room.checkout",
+      roomId: ROOM_ID,
+      path: "/repo-ux",
+      branch: null,
+      by: "lead",
+      at: "2026-09-17T10:01:00.000Z",
+    });
+    expect(detached.checkout).toMatchObject({ path: "/repo-ux", branch: null, by: "lead" });
+    apply(rooms, { type: "room.update", roomId: ROOM_ID, status: "closed", at: AT });
+    expect(
+      rejectionOf(rooms, {
+        type: "room.checkout",
+        roomId: ROOM_ID,
+        path: "/repo",
+        branch: "main",
+        by: "user",
+        at: AT,
+      }).reason,
+    ).toBe("room-closed");
+  });
+
+  it("keeps the branch an assignment merges back into", () => {
+    const rooms = createRoom();
+    apply(rooms, {
+      type: "peer.attach",
+      roomId: ROOM_ID,
+      threadId: ThreadId.make("peer-thread"),
+      reviewWorktreePath: "/worktrees/review",
+      at: AT,
+    });
+    const room = apply(rooms, assign("a1", ["src/**"]));
+    expect(room.assignments[0]).toMatchObject({ baseCommit: "abc123", targetBranch: "main" });
   });
 });

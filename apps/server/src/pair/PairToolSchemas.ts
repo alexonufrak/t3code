@@ -46,6 +46,8 @@ export const PairAssignmentView = Schema.Struct({
   branch: Schema.String,
   worktreePath: Schema.String,
   baseCommit: Schema.String,
+  /** The branch the approved commit merges back into; null merges into the room's checkout. */
+  targetBranch: Schema.NullOr(Schema.String),
   scopeGlobs: Schema.Array(Schema.String),
   acceptanceCriteria: Schema.Array(Schema.String),
   expectedArtifact: PairAssignmentArtifact,
@@ -109,6 +111,13 @@ export const PairStatusResult = Schema.Struct({
     busy: Schema.Boolean,
   }),
   guidance: Schema.String,
+  /** Where the Lead works: what the Peer's snapshot, assignment bases and merges follow. */
+  checkout: Schema.Struct({
+    path: Schema.String,
+    branch: Schema.NullOr(Schema.String),
+    /** "thread" follows the Lead thread's own directory; the Lead or the user moved it otherwise. */
+    setBy: Schema.Literals(["thread", "lead", "user"]),
+  }),
   rounds: Schema.NullOr(Schema.Struct({ used: Schema.Int, limit: Schema.Int })),
   consults: Schema.Array(
     Schema.Struct({
@@ -227,7 +236,8 @@ export const PairAssignInput = Schema.Struct({
       "patch (default): changes left in the worktree for the user to merge. commit: committed on the branch. findings: no file changes.",
   }),
   baseRef: Schema.optional(TrimmedNonEmptyString).annotate({
-    description: "Commit or branch to start from. Defaults to your checkout's HEAD.",
+    description:
+      "Local branch to start from; the assignment merges back into it. Defaults to the branch of the room's checkout.",
   }),
 });
 
@@ -240,6 +250,22 @@ export const PairAssignResult = Schema.Struct({
   detail: Schema.String,
 });
 export type PairAssignResult = typeof PairAssignResult.Type;
+
+export const PairCheckoutInput = Schema.Struct({
+  path: TrimmedNonEmptyString.annotate({
+    description:
+      "Absolute path of the worktree you work in. It must belong to the same repository as the project.",
+  }),
+});
+
+export const PairCheckoutResult = Schema.Struct({
+  status: Schema.Literals(["recorded", "rejected"]),
+  path: Schema.NullOr(Schema.String),
+  branch: Schema.NullOr(Schema.String),
+  reason: Schema.NullOr(Schema.String),
+  detail: Schema.String,
+});
+export type PairCheckoutResult = typeof PairCheckoutResult.Type;
 
 export const PairReportProgressInput = Schema.Struct({
   note: Text,

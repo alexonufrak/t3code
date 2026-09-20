@@ -111,6 +111,147 @@ it.layer(TestLayer)("PairWorkspace", (it) => {
     );
   });
 
+  describe("checkouts", () => {
+    it.effect("describes a worktree of the same repository and refuses any other", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const workspace = yield* PairWorkspace.PairWorkspace;
+        const repo = yield* initRepo;
+        const elsewhere = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pair-ux-" });
+        const ux = NodePath.join(elsewhere, "ux");
+        yield* git(repo, ["worktree", "add", "-q", "-b", "dev/ux", ux]);
+        const described = yield* workspace.describeCheckout({
+          cwd: NodePath.join(ux, "src"),
+          projectCwd: repo,
+        });
+        expect(described).toEqual({ path: yield* fileSystem.realPath(ux), branch: "dev/ux" });
+        const found = yield* workspace.findBranchWorktree({ cwd: repo, branch: "dev/ux" });
+        expect(yield* fileSystem.realPath(found!)).toBe(yield* fileSystem.realPath(ux));
+        expect(yield* workspace.findBranchWorktree({ cwd: repo, branch: "nope" })).toBeNull();
+
+        const stranger = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pair-stranger-" });
+        yield* git(stranger, ["init", "-q", "-b", "main"]);
+        const refused = yield* workspace
+          .describeCheckout({ cwd: stranger, projectCwd: repo })
+          .pipe(Effect.flip);
+        expect(refused.detail).toContain("not a worktree of this project's repository");
+        const outside = yield* workspace
+          .describeCheckout({ cwd: elsewhere, projectCwd: repo })
+          .pipe(Effect.flip);
+        expect(outside.detail).toContain("not inside a git worktree");
+
+        yield* git(ux, ["checkout", "-q", "--detach"]);
+        expect(yield* workspace.currentBranch({ cwd: ux })).toBeNull();
+        expect(
+          (yield* workspace.describeCheckout({ cwd: ux, projectCwd: repo })).branch,
+        ).toBeNull();
+      }),
+    );
+
+    it.effect("bases assignments on a local branch and knows once it holds the work", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const workspace = yield* PairWorkspace.PairWorkspace;
+        const repo = yield* initRepo;
+        const head = yield* git(repo, ["rev-parse", "HEAD"]);
+        expect(yield* workspace.resolveBase({ cwd: repo })).toEqual({
+          commit: head,
+          branch: "main",
+        });
+        yield* git(repo, ["branch", "dev/ux"]);
+        expect(yield* workspace.resolveBase({ cwd: repo, ref: "dev/ux" })).toEqual({
+          commit: head,
+          branch: "dev/ux",
+        });
+        yield* git(repo, ["tag", "v1"]);
+        // "--branches" would make rev-parse list every branch, which starts with refs/heads/ too.
+        for (const ref of [head, "v1", "missing", "--branches"]) {
+          const refused = yield* workspace.resolveBase({ cwd: repo, ref }).pipe(Effect.flip);
+          expect(refused.detail).toContain("is not a local branch");
+        }
+
+        const plan = yield* workspace.planAssignmentWorktree({
+          leadCwd: repo,
+          assignmentId: "assignment-aaaa1111",
+          title: "Base work",
+        });
+        yield* workspace.createAssignmentWorktree({ plan, baseCommit: head });
+        yield* fileSystem.writeFileString(
+          NodePath.join(plan.worktreePath, "src/retry.ts"),
+          "export const tries = 4;\n",
+        );
+        const approved = yield* workspace.sealAssignment({
+          worktreePath: plan.worktreePath,
+          branch: plan.branch,
+          message: "Pair assignment: Base work",
+        });
+        const contains = (ref: string) =>
+          workspace.containsCommit({ cwd: repo, ref, commit: approved });
+        expect(yield* contains("refs/heads/main")).toBeNull();
+        expect(yield* contains("refs/heads/missing")).toBeNull();
+        yield* git(repo, ["merge", "-q", "--no-ff", "--no-edit", approved]);
+        expect(yield* contains("refs/heads/main")).toBe(yield* git(repo, ["rev-parse", "HEAD"]));
+        expect(yield* contains("HEAD")).toBe(yield* git(repo, ["rev-parse", "HEAD"]));
+      }),
+    );
+
+    it.effect("names uncommitted files a merge would overwrite and leaves them alone", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const workspace = yield* PairWorkspace.PairWorkspace;
+        const repo = yield* initRepo;
+        const baseCommit = yield* workspace.resolveCommit({ cwd: repo });
+        const plan = yield* workspace.planAssignmentWorktree({
+          leadCwd: repo,
+          assignmentId: "assignment-bbbb2222",
+          title: "Retry tuning",
+        });
+        yield* workspace.createAssignmentWorktree({ plan, baseCommit });
+        yield* fileSystem.writeFileString(
+          NodePath.join(plan.worktreePath, "src/retry.ts"),
+          "export const tries = 4;\n",
+        );
+        const approved = yield* workspace.sealAssignment({
+          worktreePath: plan.worktreePath,
+          branch: plan.branch,
+          message: "Pair assignment: Retry tuning",
+        });
+        const integrate = () =>
+          workspace.integrate({
+            targetCwd: repo,
+            worktreePath: plan.worktreePath,
+            branch: plan.branch,
+            commit: approved,
+            message: "Pair assignment: Retry tuning",
+          });
+
+        yield* fileSystem.writeFileString(
+          NodePath.join(repo, "src/retry.ts"),
+          "export const tries = 7;\n",
+        );
+        yield* fileSystem.writeFileString(NodePath.join(repo, "README.md"), "# edited\n");
+        const dirty = yield* integrate();
+        expect(dirty).toMatchObject({ status: "dirty", files: ["src/retry.ts"] });
+        expect(dirty.status === "dirty" ? dirty.detail : "").toContain("1 uncommitted file in");
+        expect(yield* fileSystem.readFileString(NodePath.join(repo, "src/retry.ts"))).toBe(
+          "export const tries = 7;\n",
+        );
+        expect(
+          (yield* git(repo, ["status", "--porcelain"])).split("\n").map((line) => line.trim()),
+        ).toEqual(["M README.md", "M src/retry.ts"]);
+
+        // An uncommitted file the merge does not write is no obstacle.
+        yield* git(repo, ["checkout", "-q", "--", "src/retry.ts"]);
+        const merged = yield* integrate();
+        expect(merged.status).toBe("merged");
+        expect(yield* git(repo, ["status", "--porcelain"])).toBe("M README.md");
+        expect(yield* fileSystem.readFileString(NodePath.join(repo, "src/retry.ts"))).toBe(
+          "export const tries = 4;\n",
+        );
+      }),
+    );
+  });
+
   describe("assignments", () => {
     it.effect(
       "lists changed files, merges the branch, and aborts a conflicting merge cleanly",
@@ -146,7 +287,7 @@ it.layer(TestLayer)("PairWorkspace", (it) => {
             message: "Pair assignment: Tune retry policy",
           });
           const merged = yield* workspace.integrate({
-            leadCwd: repo,
+            targetCwd: repo,
             worktreePath: first.worktreePath,
             branch: first.branch,
             commit: approved,
@@ -168,7 +309,7 @@ it.layer(TestLayer)("PairWorkspace", (it) => {
             "export const tries = 9;\n",
           );
           const conflict = yield* workspace.integrate({
-            leadCwd: repo,
+            targetCwd: repo,
             worktreePath: second.worktreePath,
             branch: second.branch,
             commit: yield* workspace.sealAssignment({
@@ -178,7 +319,7 @@ it.layer(TestLayer)("PairWorkspace", (it) => {
             }),
             message: "Pair assignment: Conflicting change",
           });
-          expect(conflict.status).toBe("conflict");
+          expect(conflict).toEqual({ status: "conflict", detail: "Conflicts in src/retry.ts." });
           expect(yield* git(repo, ["status", "--porcelain"])).toBe("");
           expect(yield* fileSystem.readFileString(NodePath.join(repo, "src/retry.ts"))).toBe(
             "export const tries = 4;\n",
@@ -192,7 +333,7 @@ it.layer(TestLayer)("PairWorkspace", (it) => {
         const repo = yield* initRepo;
         const error = yield* workspace
           .integrate({
-            leadCwd: repo,
+            targetCwd: repo,
             worktreePath: repo,
             branch: "main",
             commit: "HEAD",
@@ -236,7 +377,7 @@ it.layer(TestLayer)("PairWorkspace", (it) => {
           yield* git(plan.worktreePath, ["checkout", "-q", plan.branch]);
 
           const merged = yield* workspace.integrate({
-            leadCwd: repo,
+            targetCwd: repo,
             worktreePath: plan.worktreePath,
             branch: plan.branch,
             commit: approved,
@@ -251,7 +392,7 @@ it.layer(TestLayer)("PairWorkspace", (it) => {
             "edited after approval\n",
           );
           const changed = yield* workspace.integrate({
-            leadCwd: repo,
+            targetCwd: repo,
             worktreePath: plan.worktreePath,
             branch: plan.branch,
             commit: approved,

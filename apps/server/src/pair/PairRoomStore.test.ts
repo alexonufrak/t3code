@@ -73,6 +73,35 @@ it.layer(SqlitePersistenceMemory)("PairRoomStore", (it) => {
     }),
   );
 
+  it.effect("loads rooms saved before checkouts and target branches existed", () =>
+    Effect.gen(function* () {
+      const store = yield* PairRoomStore.make;
+      yield* store.dispatch(createRoom);
+      yield* store.dispatch({
+        type: "assignment.create",
+        roomId: ROOM_ID,
+        assignmentId: "assignment-old",
+        title: "Old work",
+        threadId: ThreadId.make("thread-old"),
+        worktreePath: "/worktrees/old",
+        branch: "pair/old",
+        baseCommit: "abc123",
+        targetBranch: "main",
+        scopeGlobs: ["src/**"],
+        acceptanceCriteria: [],
+        expectedArtifact: "patch",
+        at: "2026-09-17T10:00:00.000Z",
+      });
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`UPDATE pair_rooms SET room_json = json_remove(room_json, '$.checkout', '$.assignments[0].targetBranch') WHERE room_id = ${ROOM_ID}`;
+      const reloaded = yield* PairRoomStore.make;
+      const room = Option.getOrThrow(yield* reloaded.get(ROOM_ID));
+      assert.isNull(room.checkout);
+      assert.isNull(room.assignments[0]?.targetBranch);
+      yield* sql`DELETE FROM pair_rooms`;
+    }),
+  );
+
   it.effect("keeps a room whose assignment changed a file named only with spaces", () =>
     Effect.gen(function* () {
       const store = yield* PairRoomStore.make;
@@ -86,6 +115,7 @@ it.layer(SqlitePersistenceMemory)("PairRoomStore", (it) => {
         worktreePath: "/worktrees/pair-odd",
         branch: "pair/odd",
         baseCommit: "abc",
+        targetBranch: null,
         scopeGlobs: ["src/**"],
         acceptanceCriteria: [],
         expectedArtifact: "patch",

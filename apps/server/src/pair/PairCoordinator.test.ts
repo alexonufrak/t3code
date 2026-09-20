@@ -117,6 +117,8 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
   readonly messages?: ReadonlyMap<ThreadId, OrchestrationThread["messages"]>;
   /** Thread shells when the coordinator starts; by default the Lead is mid-turn. */
   readonly shells?: ReadonlyMap<ThreadId, OrchestrationThreadShell>;
+  /** What the workspace answers when asked whether a branch already holds an approved commit. */
+  readonly mergedElsewhere?: string | null;
 }) {
   const commands = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
   // The engine answers a repeated command id with its first receipt; so does this.
@@ -142,6 +144,18 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
     status: "merged",
     commit: "merge1234567890",
   });
+  /** What `containsCommit` answers: the branch head once the approved commit is on the branch. */
+  const mergedElsewhere = yield* Ref.make<string | null>(options?.mergedElsewhere ?? null);
+  /** The checkout the last review snapshot was taken from, and the worktree the last merge ran in. */
+  const syncedFrom = yield* Ref.make<string | null>(null);
+  const integratedInto = yield* Ref.make<string | null>(null);
+  /** Worktrees of the project's repository, with the branch each has checked out. */
+  const worktrees = yield* Ref.make<ReadonlyMap<string, string | null>>(
+    new Map([
+      ["/repo", "main"],
+      ["/repo-ux", "dev/ux"],
+    ]),
+  );
 
   const dependencies = Layer.mergeAll(
     Layer.mock(OrchestrationEngineService)({
@@ -222,8 +236,43 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
           ),
         ),
       resolveCommit: () => Effect.succeed("base1234567890"),
-      syncReviewWorktree: () =>
-        Effect.succeed({ worktreePath: REVIEW_WORKTREE, snapshotCommit: "snap1234567890" }),
+      currentBranch: ({ cwd }) =>
+        Ref.get(worktrees).pipe(Effect.map((all) => all.get(cwd) ?? null)),
+      describeCheckout: ({ cwd }) =>
+        Ref.get(worktrees).pipe(
+          Effect.flatMap((all) =>
+            all.has(cwd)
+              ? Effect.succeed({ path: cwd, branch: all.get(cwd) ?? null })
+              : Effect.fail(
+                  new PairWorkspaceError({
+                    operation: "describeCheckout",
+                    detail: `${cwd} is not a worktree of this project's repository (/repo), so the room cannot follow it.`,
+                  }),
+                ),
+          ),
+        ),
+      resolveBase: ({ cwd, ref }) =>
+        Ref.get(worktrees).pipe(
+          Effect.flatMap((all) =>
+            ref !== undefined && !ref.startsWith("dev/") && ref !== "main"
+              ? Effect.fail(
+                  new PairWorkspaceError({
+                    operation: "resolveBase",
+                    detail: `"${ref}" is not a local branch.`,
+                  }),
+                )
+              : Effect.succeed({ commit: "base1234567890", branch: ref ?? all.get(cwd) ?? null }),
+          ),
+        ),
+      findBranchWorktree: ({ branch }) =>
+        Ref.get(worktrees).pipe(
+          Effect.map((all) => [...all.entries()].find(([, name]) => name === branch)?.[0] ?? null),
+        ),
+      containsCommit: () => Ref.get(mergedElsewhere),
+      syncReviewWorktree: ({ leadCwd }) =>
+        Ref.set(syncedFrom, leadCwd).pipe(
+          Effect.as({ worktreePath: REVIEW_WORKTREE, snapshotCommit: "snap1234567890" }),
+        ),
       planAssignmentWorktree: () =>
         Effect.succeed({
           repoRoot: "/repo",
@@ -233,7 +282,8 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
       createAssignmentWorktree: () => Effect.void,
       changedFiles: () => Ref.get(changedFiles),
       sealAssignment: () => Effect.succeed("approved1234567890"),
-      integrate: () => Ref.get(integration),
+      integrate: ({ targetCwd }) =>
+        Ref.set(integratedInto, targetCwd).pipe(Effect.andThen(Ref.get(integration))),
     }),
     Layer.succeed(Crypto.Crypto, testCrypto),
     PairRoomStore.layer.pipe(Layer.provide(SqlitePersistenceMemory)),
@@ -382,6 +432,10 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
     changedFiles,
     repository,
     integration,
+    mergedElsewhere,
+    worktrees,
+    syncedFrom,
+    integratedInto,
     domainEvents,
     runtimeEvents,
   };
@@ -1171,6 +1225,7 @@ describe("PairCoordinator", () => {
                 worktreePath: "/worktrees/repo/pair-inflight",
                 branch: "pair/inflight",
                 baseCommit: "base",
+                targetBranch: null,
                 scopeGlobs: ["src/**"],
                 acceptanceCriteria: [],
                 expectedArtifact: "patch",
@@ -1994,6 +2049,306 @@ describe("PairCoordinator", () => {
           expect(
             Option.getOrThrow(yield* harness.store.get(roomId)).assignments[0]?.blockedDeliveredAt,
           ).toBeNull();
+        }),
+      ),
+    );
+  });
+
+  describe("checkout", () => {
+    /** Assigns, submits and approves one assignment; the Lead may be running or idle. */
+    const approveAssignment = Effect.fn("approveAssignment")(function* (
+      harness: Effect.Success<ReturnType<typeof makeHarness>>,
+      input: { readonly baseRef?: string } = {},
+    ) {
+      const assigned = yield* harness.coordinator.assign(LEAD, {
+        title: "Retry tests",
+        brief: "Add tests for the retry policy.",
+        scopeGlobs: ["src/retry/**"],
+        acceptanceCriteria: [],
+        ...input,
+      });
+      expect(assigned.status).toBe("assigned");
+      yield* harness.coordinator.submit(ThreadId.make(assigned.threadId!), {
+        summary: "Done",
+        criteriaResults: [],
+        testsRun: [],
+        knownLimitations: [],
+      });
+      const approved = yield* harness.coordinator.review(LEAD, {
+        assignmentId: assigned.assignmentId!,
+        verdict: "approve",
+        notes: "ok",
+      });
+      expect(approved.assignment?.state).toBe("awaiting-user");
+      return assigned.assignmentId!;
+    });
+
+    it.effect("follows the checkout the Lead points it at: snapshots, assignments, status", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness();
+          const roomId = yield* harness.createRoom();
+          expect((yield* harness.coordinator.status(LEAD)).checkout).toEqual({
+            path: "/repo",
+            branch: "main",
+            setBy: "thread",
+          });
+          const moved = yield* harness.coordinator.checkout(LEAD, { path: "/repo-ux" });
+          expect(moved).toMatchObject({ status: "recorded", path: "/repo-ux", branch: "dev/ux" });
+          expect(moved.detail).toContain("on dev/ux");
+          expect((yield* harness.coordinator.status(LEAD)).checkout).toEqual({
+            path: "/repo-ux",
+            branch: "dev/ux",
+            setBy: "lead",
+          });
+
+          yield* harness.coordinator.consult(LEAD, { question: "Look at this?", waitSeconds: 0 });
+          expect(yield* Ref.get(harness.syncedFrom)).toBe("/repo-ux");
+
+          const assigned = yield* harness.coordinator.assign(LEAD, {
+            title: "UX tests",
+            brief: "Add tests.",
+            scopeGlobs: ["src/ux/**"],
+            acceptanceCriteria: [],
+          });
+          const room = Option.getOrThrow(yield* harness.store.get(roomId));
+          expect(room.assignments[0]).toMatchObject({
+            assignmentId: assigned.assignmentId,
+            baseCommit: "base1234567890",
+            targetBranch: "dev/ux",
+          });
+          const brief = (yield* harness.recorded("thread.turn.start")).at(-1)!;
+          expect(brief.message.text).toContain("of dev/ux, which your work merges back into");
+        }),
+      ),
+    );
+
+    it.effect(
+      "refuses a checkout outside the project's repository, and lets the user set one",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const harness = yield* makeHarness();
+            const roomId = yield* harness.createRoom();
+            const refused = yield* harness.coordinator.checkout(LEAD, { path: "/elsewhere" });
+            expect(refused).toMatchObject({ status: "rejected", reason: "workspace" });
+            expect(refused.detail).toContain("not a worktree of this project's repository");
+            expect(Option.getOrThrow(yield* harness.store.get(roomId)).checkout).toBeNull();
+
+            yield* harness.coordinator.consult(LEAD, { question: "Look?", waitSeconds: 0 });
+            const peerThreadId = yield* peerThreadOf(harness.store, roomId);
+            const notLead = yield* harness.coordinator.checkout(peerThreadId, { path: "/repo-ux" });
+            expect(notLead.status).toBe("rejected");
+            expect(Option.getOrThrow(yield* harness.store.get(roomId)).checkout).toBeNull();
+
+            yield* harness.coordinator.dispatchUserCommand({
+              type: "room.checkout",
+              roomId,
+              path: "/repo-ux",
+            });
+            expect(Option.getOrThrow(yield* harness.store.get(roomId)).checkout).toMatchObject({
+              path: "/repo-ux",
+              branch: "dev/ux",
+              by: "user",
+            });
+          }),
+        ),
+    );
+
+    it.effect("merges an assignment into the worktree that has its base branch checked out", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness();
+          const roomId = yield* harness.createRoom();
+          yield* harness.setShell(LEAD, { session: runningSession(LEAD, null) });
+          const assignmentId = yield* approveAssignment(harness, { baseRef: "dev/ux" });
+          expect(Option.getOrThrow(yield* harness.store.get(roomId)).assignments[0]).toMatchObject({
+            targetBranch: "dev/ux",
+          });
+          yield* harness.coordinator.dispatchUserCommand({
+            type: "assignment.integrate",
+            roomId,
+            assignmentId,
+          });
+          expect(yield* Ref.get(harness.integratedInto)).toBe("/repo-ux");
+          expect(Option.getOrThrow(yield* harness.store.get(roomId)).assignments[0]).toMatchObject({
+            state: "integrated",
+            integrationCommit: "merge1234567890",
+            note: "Merged into dev/ux as merge1234567.",
+          });
+        }),
+      ),
+    );
+
+    it.effect("refuses to merge when the base branch is checked out nowhere", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness();
+          const roomId = yield* harness.createRoom();
+          yield* harness.setShell(LEAD, { session: runningSession(LEAD, null) });
+          const assignmentId = yield* approveAssignment(harness, { baseRef: "dev/other" });
+          const error = yield* harness.coordinator
+            .dispatchUserCommand({ type: "assignment.integrate", roomId, assignmentId })
+            .pipe(Effect.flip);
+          expect(error.reason).toBe("conflict");
+          expect(error.detail).toContain("dev/other is not checked out in any worktree");
+          expect(yield* Ref.get(harness.integratedInto)).toBeNull();
+          expect(Option.getOrThrow(yield* harness.store.get(roomId)).assignments[0]?.state).toBe(
+            "awaiting-user",
+          );
+        }),
+      ),
+    );
+
+    it.effect("reports uncommitted files the merge would overwrite, and merges nothing", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness();
+          const roomId = yield* harness.createRoom();
+          yield* harness.setShell(LEAD, { session: runningSession(LEAD, null) });
+          const assignmentId = yield* approveAssignment(harness);
+          yield* Ref.set(harness.integration, {
+            status: "dirty",
+            files: ["src/retry.ts", "README.md"],
+            detail:
+              "2 uncommitted files in /repo would be overwritten by the merge: src/retry.ts, README.md. Commit or stash them, then merge again.",
+          });
+          const error = yield* harness.coordinator
+            .dispatchUserCommand({ type: "assignment.integrate", roomId, assignmentId })
+            .pipe(Effect.flip);
+          expect(error.detail).toContain("2 uncommitted files in /repo would be overwritten");
+          const assignment = Option.getOrThrow(yield* harness.store.get(roomId)).assignments[0];
+          expect(assignment?.state).toBe("awaiting-user");
+          expect(assignment?.note).toContain("Nothing was merged. 2 uncommitted files");
+        }),
+      ),
+    );
+
+    it.effect("records a merge the Lead made on the user's word once its turn ends", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness();
+          yield* harness.createRoom();
+          yield* approveAssignment(harness);
+          // The Lead merged with git itself; main now holds the approved commit.
+          yield* Ref.set(harness.mergedElsewhere, "head1234567890");
+          yield* harness.finishTurn({
+            threadId: LEAD,
+            state: "completed",
+            answer: "Merged Astra's tests.",
+            turnId: LEAD_TURN,
+          });
+          const room = yield* harness.roomWhere(
+            (candidate) => candidate.assignments[0]?.state === "integrated",
+          );
+          expect(room.assignments[0]).toMatchObject({
+            integrationCommit: "head1234567890",
+            note: "Merged into main outside the room, as head12345678.",
+          });
+          const card = (yield* harness.recorded("thread.activity.append")).findLast(
+            (command) =>
+              command.threadId === LEAD && command.activity.summary === "Assignment merged",
+          );
+          expect(card).toBeDefined();
+          expect(yield* Ref.get(harness.integratedInto)).toBeNull();
+        }),
+      ),
+    );
+
+    it.effect(
+      "records a merge done by hand instead of merging twice when the user clicks Merge",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const harness = yield* makeHarness();
+            const roomId = yield* harness.createRoom();
+            yield* harness.setShell(LEAD, { session: runningSession(LEAD, null) });
+            const assignmentId = yield* approveAssignment(harness);
+            yield* Ref.set(harness.mergedElsewhere, "head1234567890");
+            yield* harness.coordinator.dispatchUserCommand({
+              type: "assignment.integrate",
+              roomId,
+              assignmentId,
+            });
+            expect(
+              Option.getOrThrow(yield* harness.store.get(roomId)).assignments[0],
+            ).toMatchObject({
+              state: "integrated",
+              integrationCommit: "head1234567890",
+              note: "Already merged into main outside the room as head12345678.",
+            });
+            expect(yield* Ref.get(harness.integratedInto)).toBeNull();
+          }),
+        ),
+    );
+
+    it.effect("notices on boot a merge that happened while the server was down", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const peerThreadId = ThreadId.make("peer-thread");
+          const harness = yield* makeHarness({
+            mergedElsewhere: "head1234567890",
+            shells: new Map([
+              [LEAD, makeShell({ id: LEAD, session: runningSession(LEAD, null) })],
+              [peerThreadId, makeShell({ id: peerThreadId })],
+            ]),
+            seed: (store) =>
+              Effect.gen(function* () {
+                const room = yield* store.dispatch({
+                  type: "room.create",
+                  roomId: "room-restart" as PairRoomId,
+                  projectId: PROJECT_ID,
+                  leadThreadId: LEAD,
+                  leadPersona: "fable",
+                  mode: "adaptive",
+                  at: MESSAGE_AT,
+                });
+                yield* store.dispatch({
+                  type: "peer.attach",
+                  roomId: room.roomId,
+                  threadId: peerThreadId,
+                  reviewWorktreePath: REVIEW_WORKTREE,
+                  at: MESSAGE_AT,
+                });
+                yield* store.dispatch({
+                  type: "assignment.create",
+                  roomId: room.roomId,
+                  assignmentId: "assignment-down",
+                  title: "Retry tests",
+                  threadId: ThreadId.make("assignment-thread"),
+                  worktreePath: "/worktrees/repo/pair-retry-tests",
+                  branch: "pair/retry-tests",
+                  baseCommit: "base1234567890",
+                  targetBranch: "main",
+                  scopeGlobs: ["src/retry/**"],
+                  acceptanceCriteria: [],
+                  expectedArtifact: "patch",
+                  at: MESSAGE_AT,
+                });
+                yield* store.dispatch({
+                  type: "assignment.update",
+                  roomId: room.roomId,
+                  assignmentId: "assignment-down",
+                  by: "server",
+                  state: "submitted",
+                  at: MESSAGE_AT,
+                });
+                yield* store.dispatch({
+                  type: "assignment.update",
+                  roomId: room.roomId,
+                  assignmentId: "assignment-down",
+                  by: "server",
+                  state: "awaiting-user",
+                  approvedCommit: "approved1234567890",
+                  at: MESSAGE_AT,
+                });
+              }),
+          });
+          const room = Option.getOrThrow(yield* harness.store.get("room-restart" as PairRoomId));
+          expect(room.assignments[0]).toMatchObject({
+            state: "integrated",
+            integrationCommit: "head1234567890",
+          });
         }),
       ),
     );

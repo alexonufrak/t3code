@@ -102,6 +102,15 @@ export type PairRoomCommand =
       readonly at: string;
     }
   | {
+      /** The Lead's checkout moved, or its branch changed; see `PairRoomCheckout`. */
+      readonly type: "room.checkout";
+      readonly roomId: PairRoomId;
+      readonly path: string;
+      readonly branch: string | null;
+      readonly by: "lead" | "user";
+      readonly at: string;
+    }
+  | {
       readonly type: "peer.attach";
       readonly roomId: PairRoomId;
       readonly threadId: ThreadId;
@@ -155,6 +164,7 @@ export type PairRoomCommand =
       readonly worktreePath: string;
       readonly branch: string;
       readonly baseCommit: string;
+      readonly targetBranch: string | null;
       readonly scopeGlobs: ReadonlyArray<string>;
       readonly acceptanceCriteria: ReadonlyArray<string>;
       readonly expectedArtifact: PairAssignmentArtifact;
@@ -653,6 +663,7 @@ export function decidePairRoom(
         { persona: otherPairPersona(command.leadPersona), role: "peer", threadId: null },
       ],
       reviewWorktreePath: null,
+      checkout: null,
       extraRounds: null,
       consults: [],
       assignments: [],
@@ -688,6 +699,16 @@ export function decidePairRoom(
             : command.statusReason !== undefined
               ? clampNullable(command.statusReason)
               : room.statusReason,
+      });
+    }
+
+    case "room.checkout": {
+      const inactive = requireActive(room);
+      if (inactive) return { ok: false, rejection: inactive };
+      return accept({
+        ...room,
+        ...touched,
+        checkout: { path: command.path, branch: command.branch, by: command.by, at: command.at },
       });
     }
 
@@ -866,6 +887,7 @@ export function decidePairRoom(
         worktreePath: command.worktreePath,
         branch: command.branch,
         baseCommit: command.baseCommit,
+        targetBranch: command.targetBranch,
         scopeGlobs: command.scopeGlobs.map(normalizeScopePath),
         acceptanceCriteria: command.acceptanceCriteria.map((criterion) => clampPairText(criterion)),
         expectedArtifact: command.expectedArtifact,

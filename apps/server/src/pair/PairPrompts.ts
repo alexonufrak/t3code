@@ -225,7 +225,8 @@ export function peerReplyPrompt(input: {
 
 const ARTIFACT_INSTRUCTIONS: Readonly<Record<PairAssignment["expectedArtifact"], string>> = {
   findings: "Do not change files. Investigate and report findings.",
-  patch: "Leave your changes in this worktree. The user merges them after the Lead reviews.",
+  patch:
+    "Leave your changes in this worktree. They are merged after the Lead reviews them and the user says so.",
   commit: "Commit your work on this branch with clear messages.",
 };
 
@@ -236,7 +237,7 @@ export function assignmentBrief(input: {
 }): string {
   const { assignment } = input;
   return [
-    `Pair Room assignment from ${name(input.lead)} (Lead). You are ${name(assignment.owner)}, working in your own worktree on branch ${assignment.branch}, based on ${assignment.baseCommit.slice(0, 12)}.`,
+    `Pair Room assignment from ${name(input.lead)} (Lead). You are ${name(assignment.owner)}, working in your own worktree on branch ${assignment.branch}, based on ${assignment.baseCommit.slice(0, 12)}${assignment.targetBranch ? ` of ${assignment.targetBranch}, which your work merges back into` : ""}.`,
     "",
     `Objective: ${assignment.title}`,
     "",

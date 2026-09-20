@@ -27,6 +27,7 @@ import { UsersIcon } from "lucide-react";
 import { memo, useCallback, useId, useState, type ReactNode } from "react";
 
 import { Button } from "~/components/ui/button";
+import { Input } from "~/components/ui/input";
 import { Popover, PopoverPopup, PopoverTrigger } from "~/components/ui/popover";
 import { RadioGroup } from "~/components/ui/radio-group";
 import { Textarea } from "~/components/ui/textarea";
@@ -234,6 +235,8 @@ function PairRoomDetails(props: {
           </Button>
         ) : null}
       </section>
+
+      {room.status !== "closed" ? <CheckoutSection room={room} run={run} /> : null}
 
       {attention.merges.length > 0 || attention.decisions.length > 0 ? (
         <section aria-labelledby={`${headingId}-needs-you`} className="flex flex-col gap-2">
@@ -518,6 +521,91 @@ function LeadSwitchSection(props: {
   );
 }
 
+/**
+ * Where the Lead works. The room follows the Lead thread's own directory
+ * unless the Lead (with pair_checkout) or the user pointed it at another
+ * worktree; the Peer's snapshots, assignment bases and merges follow it.
+ */
+function CheckoutSection(props: { room: PairRoom; run: RoomCommandRunner }) {
+  const { room, run } = props;
+  const headingId = useId();
+  const [editing, setEditing] = useState(false);
+  const [path, setPath] = useState("");
+  const [pending, setPending] = useState(false);
+  const lead = pairRoomParticipant(room, "lead");
+  const checkout = room.checkout;
+  const submit = () => {
+    const trimmed = path.trim();
+    if (trimmed.length === 0) return;
+    setPending(true);
+    void run(
+      { type: "room.checkout", roomId: room.roomId, path: trimmed },
+      "Could not change the checkout",
+    )
+      .then((result) => {
+        if (result) setEditing(false);
+      })
+      .finally(() => setPending(false));
+  };
+  return (
+    <section aria-labelledby={headingId} className="text-xs">
+      <h3 id={headingId} className="font-medium text-foreground">
+        Checkout
+      </h3>
+      <p className="text-muted-foreground">
+        {checkout
+          ? `${checkout.branch ?? "Detached HEAD"} in ${checkout.path}, set by ${
+              checkout.by === "user" ? "you" : lead ? pairPersonaName(lead.persona) : "the Lead"
+            }.`
+          : "The Lead thread's own directory. New assignments start from its branch and merge back into it."}
+      </p>
+      {editing ? (
+        <form
+          className="mt-1 flex items-center gap-1"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submit();
+          }}
+        >
+          <Input
+            aria-label="Worktree path"
+            className="h-7 flex-1 font-mono text-xs"
+            value={path}
+            onChange={(event) => setPath(event.target.value)}
+            placeholder="/absolute/path/to/worktree"
+            disabled={pending}
+          />
+          <Button type="submit" size="xs" disabled={pending || path.trim().length === 0}>
+            {pending ? "Checking..." : "Use"}
+          </Button>
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost"
+            disabled={pending}
+            onClick={() => setEditing(false)}
+          >
+            Cancel
+          </Button>
+        </form>
+      ) : (
+        <Button
+          type="button"
+          size="xs"
+          variant="ghost"
+          className="mt-1"
+          onClick={() => {
+            setPath(checkout?.path ?? "");
+            setEditing(true);
+          }}
+        >
+          Change
+        </Button>
+      )}
+    </section>
+  );
+}
+
 function MergeRequest(props: {
   room: PairRoom;
   assignment: PairAssignment;
@@ -537,7 +625,8 @@ function MergeRequest(props: {
         <span className="font-medium text-foreground">{assignment.title}</span>
       </ThreadLink>
       <p className="text-muted-foreground">
-        {pairPersonaName(assignment.owner)}'s work on {assignment.branch} is approved by the Lead.
+        {pairPersonaName(assignment.owner)}'s work on {assignment.branch} is approved by the Lead
+        {assignment.targetBranch ? ` and merges into ${assignment.targetBranch}` : ""}.
       </p>
       <p className="mt-1 text-muted-foreground">
         Allowed to change: <span className="font-mono">{assignment.scopeGlobs.join(", ")}</span>
@@ -581,7 +670,9 @@ function MergeRequest(props: {
               .finally(() => setPending(false));
           }}
         >
-          {pending ? "Merging..." : "Merge into Lead's branch"}
+          {pending
+            ? "Merging..."
+            : `Merge into ${assignment.targetBranch ?? "the Lead's checkout"}`}
         </Button>
         <Button
           type="button"

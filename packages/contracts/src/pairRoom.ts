@@ -256,6 +256,13 @@ export const PairAssignment = Schema.Struct({
   worktreePath: TrimmedNonEmptyString,
   branch: TrimmedNonEmptyString,
   baseCommit: TrimmedNonEmptyString,
+  /**
+   * The local branch the base came from, which the approved commit merges back
+   * into. Null (older assignments) merges into the room's checkout.
+   */
+  targetBranch: Schema.NullOr(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   scopeGlobs: Schema.Array(TrimmedNonEmptyString),
   acceptanceCriteria: Schema.Array(PairText),
   expectedArtifact: PairAssignmentArtifact,
@@ -347,6 +354,21 @@ export const PairFormerParticipant = Schema.Struct({
 });
 export type PairFormerParticipant = typeof PairFormerParticipant.Type;
 
+/**
+ * Where the Lead works: the worktree the Peer's snapshot, assignment bases
+ * and merges follow. The Lead moves it with pair_checkout when it works in
+ * another worktree of the same repository; the user can set it from the room
+ * controls. A room without one follows the Lead thread's own directory.
+ */
+export const PairRoomCheckout = Schema.Struct({
+  path: TrimmedNonEmptyString,
+  /** The branch checked out there, or null when detached. The server refreshes it. */
+  branch: Schema.NullOr(TrimmedNonEmptyString),
+  by: Schema.Literals(["lead", "user"]),
+  at: IsoDateTime,
+});
+export type PairRoomCheckout = typeof PairRoomCheckout.Type;
+
 export const PairRoom = Schema.Struct({
   roomId: PairRoomId,
   projectId: ProjectId,
@@ -357,6 +379,7 @@ export const PairRoom = Schema.Struct({
   participants: Schema.Array(PairParticipant),
   /** Room-owned detached worktree the Peer reviews Lead snapshots in. */
   reviewWorktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  checkout: Schema.NullOr(PairRoomCheckout).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   /** Extra consult rounds the user granted for one Lead turn. */
   extraRounds: Schema.NullOr(Schema.Struct({ leadTurnId: TurnId, count: PositiveInt })),
   consults: Schema.Array(PairConsult),
@@ -408,6 +431,12 @@ export const PairRoomUserCommand = Schema.Union([
     type: Schema.Literal("consult.cancel"),
     roomId: PairRoomId,
     consultId: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("room.checkout"),
+    roomId: PairRoomId,
+    /** A worktree of the project's repository. The server resolves its branch. */
+    path: TrimmedNonEmptyString,
   }),
   Schema.Struct({
     type: Schema.Literal("assignment.integrate"),

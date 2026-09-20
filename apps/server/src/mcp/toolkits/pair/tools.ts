@@ -10,6 +10,8 @@ import {
   PairAskInput,
   PairAssignInput,
   PairAssignResult,
+  PairCheckoutInput,
+  PairCheckoutResult,
   PairConsultInput,
   PairHandleResult,
   PairReadThreadInput,
@@ -100,7 +102,7 @@ const PairWaitTool = Tool.make("pair_wait", {
 
 const PairAssignTool = Tool.make("pair_assign", {
   description:
-    "Pair Room, Lead only: delegate bounded work to the Peer in its own git worktree and branch. Give a self-contained brief, the globs it may change, and acceptance criteria. Returns an assignmentId to pass to pair_wait. Nothing is merged until you approve with pair_review and the user merges.",
+    "Pair Room, Lead only: delegate bounded work to the Peer in its own git worktree and branch, based on the room checkout's branch (or baseRef), which it merges back into. Give a self-contained brief, the globs it may change, and acceptance criteria. Returns an assignmentId to pass to pair_wait. It is merged after you approve with pair_review and the user says so.",
   parameters: PairAssignInput,
   success: PairAssignResult,
   failure: PairToolError,
@@ -110,6 +112,20 @@ const PairAssignTool = Tool.make("pair_assign", {
   .annotate(Tool.Readonly, false)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, false)
+  .annotate(Tool.OpenWorld, false);
+
+const PairCheckoutTool = Tool.make("pair_checkout", {
+  description:
+    "Pair Room, Lead only: tell the room which worktree you work in when it is not your thread's own directory. The Peer's snapshots, assignment bases and merges follow it. The path must be a worktree of the project's repository.",
+  parameters: PairCheckoutInput,
+  success: PairCheckoutResult,
+  failure: PairToolError,
+  dependencies,
+})
+  .annotate(Tool.Title, "Point the room at your checkout")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true)
   .annotate(Tool.OpenWorld, false);
 
 const PairReportProgressTool = Tool.make("pair_report_progress", {
@@ -188,6 +204,7 @@ export const PairToolkit = Toolkit.make(
   PairAskTool,
   PairWaitTool,
   PairAssignTool,
+  PairCheckoutTool,
   PairReportProgressTool,
   PairSubmitTool,
   PairReviewTool,
