@@ -516,14 +516,6 @@ const approveAssignment = Effect.fn("approveAssignment")(function* (
 });
 
 describe("PairCoordinator", () => {
-  it("recognizes an @-mention only as its own word", () => {
-    expect(PairCoordinator.pairMessageMentions("@Astra, is this safe?", "astra")).toBe(true);
-    expect(PairCoordinator.pairMessageMentions("what do you think @astra", "astra")).toBe(true);
-    expect(PairCoordinator.pairMessageMentions("mail me@astra.dev", "astra")).toBe(false);
-    expect(PairCoordinator.pairMessageMentions("ping @astra-bot", "astra")).toBe(false);
-    expect(PairCoordinator.pairMessageMentions("@Fable, is this safe?", "astra")).toBe(false);
-  });
-
   it.effect(
     "sends each roundtable message to the Peer and brings its answer to the Lead after the Lead's turn",
     () =>

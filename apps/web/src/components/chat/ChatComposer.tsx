@@ -981,8 +981,15 @@ import {
   usePairRoomDraft,
   usePairRoomDraftStore,
   usePairRoomsSupported,
+  usePairThreadMembership,
   type PairRoomDraft,
 } from "../../state/pairRooms";
+import {
+  pairMentionChipParticipants,
+  pairMentionTargets,
+  pairParticipantMenuItems,
+} from "./composerPairMentions";
+import { pairMentionedParticipant } from "@t3tools/shared/pairMentions";
 import { PairRoomSetupPanel } from "../pair/PairRoomSetupPanel";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
 
@@ -1617,8 +1624,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const openPrLink = useOpenPrLink(routeThreadRef);
   const [previewFileId, setPreviewFileId] = useState<string | null>(null);
   const previewFile = composerFiles.find((file) => file.id === previewFileId);
+  const pairMembership = usePairThreadMembership(routeThreadRef);
   const composerContextActions = useMemo(
     () => ({
+      pairParticipantFor: (mention: string) =>
+        pairMentionedParticipant(mention, pairMentionChipParticipants(pairMembership)),
       expandImage: (imageId: string) => {
         const preview = buildExpandedImagePreview(composerImages, imageId);
         if (preview) onExpandImage(preview);
@@ -1649,7 +1659,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         openPrLink(event, url);
       },
     }),
-    [composerFiles, composerImages, environmentId, onExpandImage, openPrLink, routeThreadRef],
+    [
+      composerFiles,
+      composerImages,
+      environmentId,
+      onExpandImage,
+      openPrLink,
+      pairMembership,
+      routeThreadRef,
+    ],
   );
   const composerContextRecords = useMemo(
     () =>
@@ -2374,14 +2392,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerMenuItems = useMemo<ComposerCommandItem[]>(() => {
     if (!composerTrigger) return [];
     if (composerTrigger.kind === "path") {
-      return workspaceEntries.entries.map((entry) => ({
-        id: `path:${entry.kind}:${entry.path}`,
-        type: "path",
-        path: entry.path,
-        pathKind: entry.kind,
-        label: basenameOfPath(entry.path),
-        description: entry.path.slice(0, Math.max(0, entry.path.lastIndexOf("/"))),
-      }));
+      // The Peer comes first: in a room, `@` is as likely to address it as a file.
+      return [
+        ...pairParticipantMenuItems(pairMentionTargets(pairMembership), composerTrigger.query),
+        ...workspaceEntries.entries.map((entry): ComposerCommandItem => ({
+          id: `path:${entry.kind}:${entry.path}`,
+          type: "path",
+          path: entry.path,
+          pathKind: entry.kind,
+          label: basenameOfPath(entry.path),
+          description: entry.path.slice(0, Math.max(0, entry.path.lastIndexOf("/"))),
+        })),
+      ];
     }
     if (composerTrigger.kind === "slash-command") {
       const builtInSlashCommandItems = [
@@ -2526,6 +2548,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedProviderSlashCommands,
     selectedProviderStatus,
     settings.showSkillsInSlashMenu,
+    pairMembership,
     workspaceEntries.entries,
   ]);
 
@@ -3616,6 +3639,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       });
       const { snapshot, trigger } = resolveActiveComposerTrigger();
       if (!trigger) return;
+      if (item.type === "pair-participant") {
+        const replacement = `@${item.label} `;
+        const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
+          snapshot.value,
+          trigger.rangeEnd,
+          replacement,
+        );
+        const applied = applyPromptReplacement(
+          trigger.rangeStart,
+          replacementRangeEnd,
+          replacement,
+          { expectedText: snapshot.value.slice(trigger.rangeStart, replacementRangeEnd) },
+        );
+        if (applied) {
+          setComposerHighlightedItemId(null);
+        }
+        return;
+      }
       if (item.type === "path") {
         const replacement = `${serializeComposerFileLink(item.path)} `;
         const replacementRangeEnd = extendReplacementRangeForTrailingSpace(

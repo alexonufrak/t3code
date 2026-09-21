@@ -19,6 +19,10 @@
       "types": "./src/pairMirror.ts",
       "import": "./src/pairMirror.ts"
     },
+    "./pairMentions": {
+      "types": "./src/pairMentions.ts",
+      "import": "./src/pairMentions.ts"
+    },
     "./pairRoomNote": {
       "types": "./src/pairRoomNote.ts",
       "import": "./src/pairRoomNote.ts"

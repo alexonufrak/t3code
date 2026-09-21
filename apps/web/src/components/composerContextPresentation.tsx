@@ -1,3 +1,4 @@
+import type { PairMentionParticipant } from "@t3tools/shared/pairMentions";
 import ChatMarkdown from "./ChatMarkdown";
 import { ReadOnlySourcePreview } from "./files/AttachmentFilePreview";
 import type { PreviewAnnotationPayload } from "@t3tools/contracts";
@@ -71,6 +72,8 @@ export interface ComposerContextActions {
   openFile: (fileId: string) => void;
   openMention: (path: string) => void;
   openPullRequest: (event: MouseEvent<HTMLElement>, url: string) => void;
+  /** In a Pair Room thread, the participant an `@name` mention stands for, so it draws as a person and not a file. */
+  pairParticipantFor?: (mention: string) => PairMentionParticipant | null;
 }
 
 export const ComposerContextActionsContext = createContext<ComposerContextActions>({

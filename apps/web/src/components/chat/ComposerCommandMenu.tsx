@@ -4,6 +4,8 @@ import {
   type ProviderSkillSourceKind,
 } from "@t3tools/client-runtime/providerSkills";
 import {
+  type PairPersona,
+  type PairRole,
   type ProjectEntry,
   type ProviderDriverKind,
   type PullRequestContextMetadata,
@@ -64,6 +66,14 @@ export type ComposerCommandItem =
       id: string;
       type: "pull-request";
       pullRequest: PullRequestContextMetadata;
+      label: string;
+      description: string;
+    }
+  | {
+      id: string;
+      type: "pair-participant";
+      persona: PairPersona;
+      role: PairRole;
       label: string;
       description: string;
     };
@@ -182,6 +192,9 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
           theme={props.resolvedTheme}
         />
       ) : null}
+      {props.item.type === "pair-participant" ? (
+        <UserRoundIcon aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
+      ) : null}
       {pullRequestPresentation ? (
         <pullRequestPresentation.Icon
           role="img"
@@ -208,6 +221,11 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
             kind={skillSourceKind}
             showSkillSuffix={props.triggerKind === "skill"}
           />
+        ) : null}
+        {props.item.type === "pair-participant" ? (
+          <Badge className="ms-auto" variant="secondary">
+            {props.item.role === "peer" ? "Peer" : "Lead"}
+          </Badge>
         ) : null}
       </span>
     </CommandItem>

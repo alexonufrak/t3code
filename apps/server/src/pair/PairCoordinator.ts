@@ -37,6 +37,7 @@ import {
   pairMirrorProgressPayload,
   pairMirrorStartedPayload,
 } from "@t3tools/shared/pairMirror";
+import { pairMessageMentions } from "@t3tools/shared/pairMentions";
 import { pairRoomNoteContext, readPairRoomNote } from "@t3tools/shared/pairRoomNote";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -362,9 +363,6 @@ export const pairDecisionView = (decision: PairDecision): PairDecisionView => ({
 const titleFrom = (text: string) => clampPairText(text.split("\n")[0] ?? text, 120);
 
 /** "@Astra" as its own word, in any case. "me@astra.dev" and "@astra-bot" do not count. */
-export const pairMessageMentions = (text: string, persona: PairPersona) =>
-  new RegExp(`(?<![\\w@.])@${PAIR_PERSONAS[persona].displayName}(?![\\w-])`, "i").test(text);
-
 /** What a consult card calls the exchange: the user's own message, the Lead's consult, a reply in it, or the sign-off. */
 const consultNoun = (consult: PairConsult) =>
   consult.answerTo === "lead-turn"
@@ -2951,7 +2949,7 @@ export const make = Effect.gen(function* () {
       );
       // Turns the room starts itself (answers, handoffs) carry a note and are never relayed.
       if (message?.role !== "user" || readPairRoomNote(message.context) !== null) return;
-      const mentioned = pairMessageMentions(message.text, peer.persona);
+      const mentioned = pairMessageMentions(message.text, { persona: peer.persona, role: "peer" });
       if (!mentioned && room.mode !== "roundtable") return;
       const leadNow = yield* leadContext(room);
       const title = titleFrom(message.text);

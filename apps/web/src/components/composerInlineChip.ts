@@ -56,7 +56,11 @@ export const CONTEXT_INLINE_CHIP_TONE_CLASS_NAMES = {
   "pull-request": `${CONTEXT_INLINE_CHIP_TONE_CLASS_NAME} [--context-chip-accent:oklch(0.62_0.16_277)]`,
   skill: `${CONTEXT_INLINE_CHIP_TONE_CLASS_NAME} [--context-chip-accent:oklch(0.62_0.16_322)]`,
   citation: `${CONTEXT_INLINE_CHIP_TONE_CLASS_NAME} [--context-chip-accent:oklch(0.62_0.16_259)]`,
+  participant: `${CONTEXT_INLINE_CHIP_TONE_CLASS_NAME} [--context-chip-accent:oklch(0.62_0.16_340)]`,
 } as const;
+
+/** A Pair Room participant named in the composer: a person, not a file. */
+export const PAIR_PARTICIPANT_CHIP_CLASS_NAME = `${COMPOSER_INLINE_CHIP_CLASS_NAME} ${CONTEXT_INLINE_CHIP_TONE_CLASS_NAMES.participant}`;
 
 export const PULL_REQUEST_INLINE_CHIP_TONE_CLASS_NAMES = {
   open: `${CONTEXT_INLINE_CHIP_TONE_CLASS_NAME} [--context-chip-accent:oklch(0.62_0.134_163)]`,

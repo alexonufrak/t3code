@@ -62,8 +62,12 @@ import {
   COMPOSER_INLINE_CHIP_ICON_CLASS_NAME,
   COMPOSER_INLINE_CHIP_LABEL_CLASS_NAME,
   COMPOSER_INLINE_SKILL_CHIP_CLASS_NAME,
+  PAIR_PARTICIPANT_CHIP_CLASS_NAME,
   SKILL_CHIP_ICON_SVG,
 } from "./composerInlineChip";
+import { PAIR_PERSONAS } from "@t3tools/contracts";
+import { pairMentionTrailing } from "@t3tools/shared/pairMentions";
+import { UserRoundIcon } from "lucide-react";
 import { FILE_TAG_CHIP_CLASS_NAME, FileTagChipContent } from "./chat/FileTagChip";
 import { AssistantCitationChip } from "./chat/AssistantCitationChip";
 import { getTimelinePageScrollKey } from "./chat/pageScrollController";
@@ -215,6 +219,35 @@ const ComposerMentionExtension = Node.create({
 function ComposerMentionNodeView({ node }: NodeViewProps) {
   const actions = use(ComposerContextActionsContext);
   const path = (node.attrs.path as string) ?? "";
+  const participant = actions.pairParticipantFor?.(path) ?? null;
+  if (participant) {
+    const name = PAIR_PERSONAS[participant.persona].displayName;
+    const role = participant.role === "peer" ? "Peer" : "Lead";
+    return (
+      <NodeViewWrapper as="span" className={COMPOSER_INLINE_CHIP_DECORATOR_CLASS_NAME}>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span
+                className={PAIR_PARTICIPANT_CHIP_CLASS_NAME}
+                contentEditable={false}
+                spellCheck={false}
+                data-composer-participant-chip={participant.role}
+              >
+                <UserRoundIcon aria-hidden className={COMPOSER_INLINE_CHIP_ICON_CLASS_NAME} />
+                <span className={COMPOSER_INLINE_CHIP_LABEL_CLASS_NAME}>{name}</span>
+                <span className="text-[0.8em] opacity-70">{role}</span>
+              </span>
+            }
+          />
+          <TooltipPopup side="top" className="whitespace-normal leading-tight">
+            {`${name}, the ${role} in this Pair Room. @${participant.role} works too.`}
+          </TooltipPopup>
+        </Tooltip>
+        {pairMentionTrailing(path)}
+      </NodeViewWrapper>
+    );
+  }
   const chip = (
     <Button
       variant="chip"
