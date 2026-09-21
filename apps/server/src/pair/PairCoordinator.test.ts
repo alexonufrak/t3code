@@ -379,10 +379,12 @@ const makeHarness = Effect.fn("makePairCoordinatorHarness")(function* (options?:
     readonly createdAt: string;
     readonly context?: OrchestrationMessageContext;
     readonly threadId?: ThreadId;
+    /** The server names an answer to an async question after its request id. */
+    readonly messageId?: string;
   }) {
     userMessages += 1;
     const threadId = input.threadId ?? LEAD;
-    const messageId = MessageId.make(`user-message-${userMessages}`);
+    const messageId = MessageId.make(input.messageId ?? `user-message-${userMessages}`);
     yield* Ref.update(messages, (all) =>
       new Map(all).set(threadId, [
         ...(all.get(threadId) ?? []),
@@ -2395,6 +2397,15 @@ describe("PairCoordinator", () => {
             });
             expect(result.detail).toContain("Tell the user");
             expect(yield* Ref.get(harness.integratedInto)).toBe("/repo");
+            const twice = yield* harness.coordinator.integrate(LEAD, {
+              assignmentId,
+              userWords: "merge astra's tests",
+            });
+            expect(twice).toMatchObject({
+              status: "rejected",
+              reason: "invalid",
+              detail: "This assignment is already merged.",
+            });
             expect(
               Option.getOrThrow(yield* harness.store.get(roomId)).assignments[0],
             ).toMatchObject({
@@ -2500,6 +2511,290 @@ describe("PairCoordinator", () => {
           const assignment = Option.getOrThrow(yield* harness.store.get(roomId)).assignments[0];
           expect(assignment?.state).toBe("awaiting-user");
           expect(assignment?.note).toBe("Nothing was merged. Conflicts in src/retry.ts.");
+        }),
+      ),
+    );
+  });
+
+  describe("questions in the Lead's thread", () => {
+    type Harness = Effect.Success<ReturnType<typeof makeHarness>>;
+    const questionsAsked = (harness: Harness) =>
+      harness
+        .recorded("thread.activity.append")
+        .pipe(
+          Effect.map((commands) =>
+            commands
+              .filter(
+                (command) =>
+                  command.threadId === LEAD && command.activity.kind === "user-input.requested",
+              )
+              .map((command) => command.activity.payload as Record<string, unknown>),
+          ),
+        );
+    const withdrawn = (harness: Harness) =>
+      harness
+        .recorded("thread.user-input.dismiss")
+        .pipe(Effect.map((commands) => commands.map((command) => String(command.requestId))));
+    /** The user answers (or dismisses, with no answer) a question, the way the server records it. */
+    const answer = (harness: Harness, requestId: string, text: string | null) =>
+      PubSub.publish(
+        harness.domainEvents,
+        threadEvent("thread.activity-appended", LEAD, {
+          activity: {
+            id: `async-answer:${requestId}`,
+            kind: "user-input.resolved",
+            summary: text ? "User input submitted" : "User input dismissed",
+            tone: "info",
+            turnId: null,
+            createdAt: MESSAGE_AT,
+            payload: {
+              requestId,
+              responseMode: "message",
+              ...(text ? { answers: { answer: text } } : {}),
+            },
+          },
+        }),
+      );
+
+    it.effect("asks the user to merge once the Lead approves, in words that name the work", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness();
+          const roomId = yield* harness.createRoom();
+          const assignmentId = yield* approveAssignment(harness, { baseRef: "dev/ux" });
+          const asked = yield* questionsAsked(harness);
+          expect(asked).toHaveLength(1);
+          expect(asked[0]).toMatchObject({
+            requestId: `pair:${roomId}:merge:${assignmentId}:approved1234567890`,
+            responseMode: "message",
+          });
+          const question = (asked[0]!.questions as Array<Record<string, unknown>>)[0]!;
+          expect(question.question).toBe(
+            'Fable approved Astra\'s assignment "Retry tests". Merge it into dev/ux?',
+          );
+          expect(question).toMatchObject({ allowCustomAnswer: true, multiSelect: false });
+          expect(
+            (question.options as Array<{ label: string }>).map((option) => option.label),
+          ).toEqual(["Merge", "Send back"]);
+        }),
+      ),
+    );
+
+    it.effect(
+      "merges when the user answers Merge, without waiting for the Lead's turn to end",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const harness = yield* makeHarness();
+            const roomId = yield* harness.createRoom();
+            const assignmentId = yield* approveAssignment(harness);
+            yield* answer(
+              harness,
+              `pair:${roomId}:merge:${assignmentId}:approved1234567890`,
+              "Merge",
+            );
+            const room = yield* harness.roomWhere(
+              (candidate) => candidate.assignments[0]?.state === "integrated",
+            );
+            expect(room.assignments[0]).toMatchObject({
+              integrationCommit: "merge1234567890",
+              note: "Merged into main as merge1234567.",
+            });
+            expect(yield* Ref.get(harness.integratedInto)).toBe("/repo");
+          }),
+        ),
+    );
+
+    it.effect(
+      "leaves the assignment to the Lead when the user sends it back, types, or dismisses",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const harness = yield* makeHarness();
+            const roomId = yield* harness.createRoom();
+            const assignmentId = yield* approveAssignment(harness);
+            const requestId = `pair:${roomId}:merge:${assignmentId}:approved1234567890`;
+            const barrier = yield* harness.coordinator.recordDecision(LEAD, {
+              category: "product",
+              title: "Barrier",
+              position: "Either way.",
+              waitSeconds: 0,
+            });
+            yield* answer(harness, requestId, "Send back");
+            yield* answer(harness, requestId, "merge after rebasing");
+            yield* answer(harness, requestId, null);
+            // Answers are handled in order, so a settled decision proves the three above were seen.
+            yield* answer(harness, `pair:${roomId}:decision:${barrier.handle}:1`, "Either.");
+            const room = yield* harness.roomWhere(
+              (candidate) => candidate.decisions[0]?.resolution === "Either.",
+            );
+            expect(room.assignments[0]?.state).toBe("awaiting-user");
+            expect(yield* Ref.get(harness.integratedInto)).toBeNull();
+          }),
+        ),
+    );
+
+    it.effect(
+      "withdraws the merge question when the assignment is merged or sent back another way",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const harness = yield* makeHarness();
+            const roomId = yield* harness.createRoom();
+            yield* harness.setShell(LEAD, { session: runningSession(LEAD, null) });
+            const assignmentId = yield* approveAssignment(harness);
+            const requestId = `pair:${roomId}:merge:${assignmentId}:approved1234567890`;
+            yield* harness.coordinator.dispatchUserCommand({
+              type: "assignment.integrate",
+              roomId,
+              assignmentId,
+            });
+            expect(yield* withdrawn(harness)).toEqual([requestId]);
+
+            const again = yield* approveAssignment(harness);
+            const secondId = `pair:${roomId}:merge:${again}:approved1234567890`;
+            expect((yield* questionsAsked(harness)).map((entry) => entry.requestId)).toEqual([
+              requestId,
+              secondId,
+            ]);
+            yield* harness.coordinator.dispatchUserCommand({
+              type: "room.update",
+              roomId,
+              status: "closed",
+            });
+            expect(yield* withdrawn(harness)).toEqual([requestId, secondId]);
+          }),
+        ),
+    );
+
+    it.effect(
+      "asks the user to settle a decision that is theirs, refreshed when a position arrives",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const harness = yield* makeHarness();
+            const roomId = yield* harness.createRoom();
+            const pending = yield* harness.coordinator.recordDecision(LEAD, {
+              category: "product",
+              title: "Ship the retry toggle?",
+              position: "Ship it behind a flag.",
+              leadRecommendation: "Behind a flag, so support can turn it off.",
+              waitSeconds: 0,
+            });
+            expect(pending.status).toBe("pending");
+            const decisionId = pending.handle!;
+            const first = (yield* questionsAsked(harness))[0]!;
+            expect(first.requestId).toBe(`pair:${roomId}:decision:${decisionId}:1`);
+            const question = (first.questions as Array<Record<string, unknown>>)[0]!;
+            expect(question.header).toBe("Decision");
+            expect(question.question).toBe(
+              "Ship the retry toggle? (product: your call). Fable recommends: Behind a flag, so support can turn it off.",
+            );
+            expect(question.options).toEqual([
+              { label: "Fable's position", description: "Ship it behind a flag." },
+            ]);
+
+            yield* harness.coordinator.consult(LEAD, { question: "Thoughts?", waitSeconds: 0 });
+            const peerThreadId = yield* peerThreadOf(harness.store, roomId);
+            yield* harness.coordinator.recordDecision(peerThreadId, {
+              decisionId,
+              position: "Ship it on by default; the flag is dead weight.",
+              waitSeconds: 0,
+            });
+            expect(yield* withdrawn(harness)).toEqual([`pair:${roomId}:decision:${decisionId}:1`]);
+            const second = (yield* questionsAsked(harness))[1]!;
+            expect(second.requestId).toBe(`pair:${roomId}:decision:${decisionId}:2`);
+            expect(
+              (
+                (second.questions as Array<Record<string, unknown>>)[0]!.options as Array<{
+                  label: string;
+                }>
+              ).map((option) => option.label),
+            ).toEqual(["Fable's position", "Astra's position"]);
+
+            yield* answer(harness, second.requestId as string, "Astra's position");
+            const room = yield* harness.roomWhere(
+              (candidate) => candidate.decisions[0]?.resolution !== null,
+            );
+            expect(room.decisions[0]).toMatchObject({
+              resolution: "Astra's position: Ship it on by default; the flag is dead weight.",
+              resolvedBy: "user",
+            });
+            expect(room.decisions[0]?.resolutionDeliveredAt).not.toBeNull();
+            // The answer turn the server starts carries the decision; the room starts none of its own.
+            expect(
+              (yield* harness.recorded("thread.turn.start")).filter(
+                (command) => command.threadId === LEAD,
+              ),
+            ).toHaveLength(0);
+          }),
+        ),
+    );
+
+    it.effect("copies an answer to the Peer as a transcript line instead of relaying it", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness();
+          const roomId = yield* harness.createRoom("roundtable");
+          yield* harness.sendUserMessage({
+            text: "Should retries use jitter?",
+            createdAt: MESSAGE_AT,
+          });
+          yield* harness.commandWhere(
+            turnStartWhere(
+              (command) => readPairRoomNote(command.message.context)?.purpose === "user-relay",
+            ),
+          );
+          const peerThreadId = yield* peerThreadOf(harness.store, roomId);
+          yield* harness.finishTurn({
+            threadId: peerThreadId,
+            state: "completed",
+            answer: "Yes, full jitter.",
+          });
+          yield* harness.sendUserMessage({
+            text: 'Fable approved Astra\'s assignment "Retry tests". Merge it into main?\nMerge',
+            // Later than the consult's request time, or the copy reads as delivered with it.
+            createdAt: "1970-01-01T00:00:01.000Z",
+            messageId: `async-answer:pair:${roomId}:merge:assignment-1:approved1234567890`,
+          });
+          const copied = yield* harness.commandWhere(
+            (command) =>
+              command.type === "thread.message.user.append" &&
+              command.threadId === peerThreadId &&
+              command.message.text.includes("Merge it into main?"),
+          );
+          expect(
+            copied.type === "thread.message.user.append"
+              ? readPairRoomNote(copied.message.context)?.purpose
+              : null,
+          ).toBe("transcript");
+          // Relaying runs before copying, so the copy landing means the answer was not made a prompt.
+          const room = Option.getOrThrow(yield* harness.store.get(roomId));
+          expect(room.consults.map((entry) => entry.kind)).toEqual(["roundtable"]);
+        }),
+      ),
+    );
+
+    it.effect("withdraws a decision question settled from the room controls", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness();
+          const roomId = yield* harness.createRoom();
+          const pending = yield* harness.coordinator.recordDecision(LEAD, {
+            category: "scope",
+            title: "Include the dashboard?",
+            position: "Out of scope for this pass.",
+            waitSeconds: 0,
+          });
+          yield* harness.coordinator.dispatchUserCommand({
+            type: "decision.resolve",
+            roomId,
+            decisionId: pending.handle!,
+            resolution: "Leave it out.",
+          });
+          expect(yield* withdrawn(harness)).toEqual([
+            `pair:${roomId}:decision:${pending.handle}:1`,
+          ]);
         }),
       ),
     );
